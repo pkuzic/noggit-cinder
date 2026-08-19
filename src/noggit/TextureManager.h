@@ -55,8 +55,8 @@ struct blp_texture : public AsyncObject
   void finishLoading() override;
   virtual void waitForChildrenLoaded() override {};
 
-  void loadFromUncompressedData(BLPHeader const* lHeader, char const* lData);
-  void loadFromCompressedData(BLPHeader const* lHeader, char const* lData);
+  void loadFromUncompressedData(BLPHeader const* lHeader, char const* lData, std::size_t buffer_size);
+  void loadFromCompressedData(BLPHeader const* lHeader, char const* lData, std::size_t buffer_size);
 
   int width() const;
   int height() const;

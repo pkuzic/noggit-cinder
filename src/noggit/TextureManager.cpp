@@ -349,8 +349,15 @@ blp_texture* blp_texture::getHeightMap()
   return heightMap.get();
 }
 
-void blp_texture::loadFromUncompressedData(BLPHeader const* lHeader, char const* lData)
+void blp_texture::loadFromUncompressedData(BLPHeader const* lHeader, char const* lData, std::size_t buffer_size)
 {
+  // palette table must fit inside the file
+  if (sizeof(BLPHeader) + 256 * 4 > buffer_size)
+  {
+    LogError << "Palettized BLP too small for its palette: " << _file_key.stringRepr() << std::endl;
+    return;
+  }
+
   unsigned int const* pal = reinterpret_cast<unsigned int const*>(lData + sizeof(BLPHeader));
 
   unsigned char const* buf;
@@ -370,9 +377,29 @@ void blp_texture::loadFromUncompressedData(BLPHeader const* lHeader, char const*
 
     if (lHeader->offsets[i] > 0 && lHeader->sizes[i] > 0)
     {
+      // The header's sizes[i]/offsets[i] come straight from the file and malformed/custom BLPs
+      // (vanilla minimaps are the classic palettized case) can understate them. The old code
+      // allocated by sizes[i] BYTES yet wrote width*height uint32 pixels -- a lying header
+      // sprayed pixel data across the heap (observed as multi-thread poisoned-pointer crashes
+      // while minimap thumbnails load). Bound the source and size the buffer by what we write.
+      std::size_t const n_px = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+      std::size_t needed_src = n_px; // 1 byte per palette index
+      if (alphabits == 8)
+        needed_src += n_px;
+      else if (alphabits == 1)
+        needed_src += (n_px + 7) / 8;
+
+      if (lHeader->offsets[i] + static_cast<std::size_t>(lHeader->sizes[i]) > buffer_size
+       || lHeader->sizes[i] < needed_src)
+      {
+        LogError << "Palettized BLP mip " << i << " data out of bounds (" << _file_key.stringRepr()
+                 << ") -- stopping at previous mip." << std::endl;
+        return;
+      }
+
       buf = reinterpret_cast<unsigned char const*>(&lData[lHeader->offsets[i]]);
 
-      std::vector<uint32_t> data(lHeader->sizes[i]);
+      std::vector<uint32_t> data(n_px);
 
       int cnt = 0;
       p = data.data();
@@ -425,7 +452,7 @@ void blp_texture::loadFromUncompressedData(BLPHeader const* lHeader, char const*
   }
 }
 
-void blp_texture::loadFromCompressedData(BLPHeader const* lHeader, char const* lData)
+void blp_texture::loadFromCompressedData(BLPHeader const* lHeader, char const* lData, std::size_t buffer_size)
 {
   //                         0 (0000) & 3 == 0                1 (0001) & 3 == 1                    7 (0111) & 3 == 3
   const int alphatypes[] = { GL_COMPRESSED_RGB_S3TC_DXT1_EXT, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 0, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT };
@@ -441,6 +468,13 @@ void blp_texture::loadFromCompressedData(BLPHeader const* lHeader, char const* l
   {
     if (lHeader->sizes[i] <= 0 || lHeader->offsets[i] <= 0)
     {
+      return;
+    }
+
+    // never read past the actual file: offsets/sizes come straight from the (possibly lying) header
+    if (lHeader->offsets[i] + static_cast<std::size_t>(lHeader->sizes[i]) > buffer_size)
+    {
+      LogDebug << "mipmap data out of file bounds in '" << _file_key.stringRepr() << "'" << std::endl;
       return;
     }
 
@@ -534,11 +568,11 @@ void blp_texture::finishLoading()
 
   if (lHeader->attr_0_compression == 1)
   {
-    loadFromUncompressedData(lHeader, lData);
+    loadFromUncompressedData(lHeader, lData, f.getSize());
   }
   else if (lHeader->attr_0_compression == 2)
   {
-    loadFromCompressedData(lHeader, lData);
+    loadFromCompressedData(lHeader, lData, f.getSize());
   }
   else
   {
@@ -551,11 +585,11 @@ void blp_texture::finishLoading()
 
       if (lHeader_f->attr_0_compression == 1)
       {
-          loadFromUncompressedData(lHeader_f, lData_f);
+          loadFromUncompressedData(lHeader_f, lData_f, fallback.getSize());
       }
       else if (lHeader_f->attr_0_compression == 2)
       {
-          loadFromCompressedData(lHeader_f, lData_f);
+          loadFromCompressedData(lHeader_f, lData_f, fallback.getSize());
       }
       else
       {
