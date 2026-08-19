@@ -16,6 +16,11 @@ public:
 
   // Open database. It must be openened before it can be used.
   void open(std::shared_ptr<BlizzardArchive::ClientData> clientData);
+
+  // Initialise the table from synthesized in-memory rows. Used for tables a vanilla (1.12)
+  // client simply doesn't ship (e.g. LiquidType.dbc) where noggit needs a small stand-in.
+  void loadFromMemory(std::uint32_t field_count, std::vector<unsigned char> record_data,
+                      std::vector<char> string_table);
   void save();
 
   void overwriteWith(DBCFile const& file);

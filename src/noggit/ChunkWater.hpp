@@ -34,6 +34,11 @@ public:
   void from_mclq(std::vector<mclq>& layers);
   void fromFile(BlizzardArchive::ClientFile& f, size_t basePos);
   void save(util::sExtendableArray& adt, int base_pos, int& header_pos, int& current_pos);
+  // MUST be called before sizing/writing an mclq-mode MCNK: drops empty layers and refreshes
+  // attributes so layer_count() matches what save_mclq will actually write. When cleanup lived
+  // inside save_mclq, the caller sized the chunk with the PRE-cleanup count and every tile
+  // where a layer got dropped saved corrupt (declared size != written bytes).
+  void prepare_mclq_save();
   void save_mclq(util::sExtendableArray& adt, int mcnk_pos, int& current_pos);
 
   bool is_visible ( const float& cull_distance

@@ -1771,6 +1771,14 @@ void MapChunk::save(util::sExtendableArray& lADTFile
   {
     auto liquids = liquid_chunk();
 
+    // drop empty layers NOW so layer_count() below matches what save_mclq writes; when this
+    // cleanup ran inside save_mclq, the sizes were computed from the stale count and every
+    // tile that lost a layer (e.g. the Stormwind canals) saved corrupt.
+    if (liquids)
+    {
+      liquids->prepare_mclq_save();
+    }
+
     if (liquids && liquids->layer_count() > 0)
     {
       int liquids_size = 8 + liquids->layer_count() * sizeof(mclq);

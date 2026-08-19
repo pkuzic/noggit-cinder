@@ -194,12 +194,15 @@ void ChunkWater::save(util::sExtendableArray& adt, int base_pos, int& header_pos
   header_pos += sizeof(MH2O_Header);
 }
 
-void ChunkWater::save_mclq(util::sExtendableArray& adt, int mcnk_pos, int& current_pos)
+void ChunkWater::prepare_mclq_save()
 {
-  // remove empty layers
+  // remove empty layers + refresh attributes BEFORE the caller sizes the MCNK -- see header.
   cleanup();
   update_attributes();
+}
 
+void ChunkWater::save_mclq(util::sExtendableArray& adt, int mcnk_pos, int& current_pos)
+{
   if (hasData(0))
   {
     adt.Extend(sizeof(mclq) * _layer_count + 8);

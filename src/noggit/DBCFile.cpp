@@ -66,6 +66,19 @@ void DBCFile::open(std::shared_ptr<BlizzardArchive::ClientData> clientData)
   f.close();
 }
 
+void DBCFile::loadFromMemory(std::uint32_t field_count, std::vector<unsigned char> record_data,
+                             std::vector<char> string_table)
+{
+  assert(field_count && record_data.size() % (field_count * 4) == 0);
+
+  fieldCount = field_count;
+  recordSize = field_count * 4;
+  recordCount = static_cast<std::uint32_t>(record_data.size() / recordSize);
+  data = std::move(record_data);
+  stringTable = std::move(string_table);
+  stringSize = static_cast<std::uint32_t>(stringTable.size());
+}
+
 void DBCFile::save()
 {
   QString str = QString(Noggit::Project::CurrentProject::get()->ProjectPath.c_str());

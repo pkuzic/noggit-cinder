@@ -5,6 +5,7 @@
 #include <noggit/Misc.h>
 #include <noggit/project/CurrentProject.hpp>
 #include <blizzard-archive-library/include/ClientData.hpp>
+#include <cstring>
 #include <string>
 #include <Exception.hpp>
 
@@ -76,6 +77,54 @@ void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData)
   open_db(gGroundEffectTextureDB, "GroundEffectTexture.dbc");
   open_db(gTerrainTypeDB, "TerrainType.dbc");
   open_db(gLiquidTypeDB, "LiquidType.dbc", !is_vanilla); // TBC+
+
+  if (is_vanilla)
+  {
+    // 1.12 clients have no LiquidType.dbc, but the liquid renderer and the water tool are
+    // driven entirely by this table -- without it, water simply doesn't draw. Synthesize the
+    // four classic liquids (+ the green-lava variant used by the mclq settings) pointing at
+    // the animated texture sets every vanilla client ships in texture.MPQ. The column layout
+    // is WotLK LiquidType.dbc (45 fields) since that's what LiquidTypeDB's indices assume.
+    constexpr std::uint32_t n_fields = 45;
+    struct liquid_row { std::uint32_t id; char const* name; std::uint32_t type; char const* tex; };
+    liquid_row const rows[] = {
+      { 1, "Water",      0, "XTextures\\river\\lake_a.%d.blp"  },
+      { 2, "Ocean",      1, "XTextures\\ocean\\ocean_h.%d.blp" },
+      { 3, "Magma",      2, "XTextures\\lava\\lava.%d.blp"     },
+      { 4, "Slime",      3, "XTextures\\slime\\slime.%d.blp"   },
+      {15, "Green Lava", 2, "XTextures\\lava\\lava.%d.blp"     },
+    };
+
+    std::vector<char> strings(1, '\0'); // offset 0 == empty string by DBC convention
+    auto add_string = [&strings](char const* s) -> std::uint32_t
+    {
+      std::uint32_t const ofs = static_cast<std::uint32_t>(strings.size());
+      strings.insert(strings.end(), s, s + std::strlen(s) + 1);
+      return ofs;
+    };
+
+    std::vector<unsigned char> records;
+    for (liquid_row const& r : rows)
+    {
+      std::uint32_t fields[n_fields] = {};
+      fields[LiquidTypeDB::ID] = r.id;
+      fields[LiquidTypeDB::Name] = add_string(r.name);
+      fields[LiquidTypeDB::Type] = r.type;
+      fields[LiquidTypeDB::ShaderType] = 0;                       // plain textured fluid
+      fields[LiquidTypeDB::TextureFilenames] = add_string(r.tex);
+      float const anim_x = 1.f, anim_y = 0.f;                     // noggit's default water params
+      std::memcpy(&fields[LiquidTypeDB::AnimationX], &anim_x, 4);
+      std::memcpy(&fields[LiquidTypeDB::AnimationY], &anim_y, 4);
+
+      auto const* p = reinterpret_cast<unsigned char const*>(fields);
+      records.insert(records.end(), p, p + sizeof(fields));
+    }
+
+    gLiquidTypeDB.loadFromMemory(n_fields, std::move(records), std::move(strings));
+    Log << "Synthesized vanilla LiquidType table ("
+        << gLiquidTypeDB.getRecordCount() << " liquids)." << std::endl;
+  }
+
   open_db(gSoundProviderPreferencesDB, "SoundProviderPreferences.dbc");
   open_db(gSoundAmbienceDB, "SoundAmbience.dbc");
   open_db(gZoneMusicDB, "ZoneMusic.dbc");

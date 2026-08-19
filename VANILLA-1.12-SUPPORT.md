@@ -142,8 +142,11 @@ list → tile grid → 3D editor with terrain + v256 models rendering, 1969 obje
   colour/transparency/texture-animation blocks, leaving those vectors empty while lookup tables still
   index them → access violations. Size-guard `_colors`, `_transparency`, `_texture_animations`.
 - **Liquid render** (`LiquidRender.cpp`): `tex_frames.at(liquidID)` threw because vanilla has no
-  LiquidType.dbc to populate the liquid texture-frame table — skip a layer whose type isn't present
-  (water simply doesn't render; terrain/models do).
+  LiquidType.dbc to populate the liquid texture-frame table — skip a layer whose type isn't present.
+  Later superseded: `OpenDBs` now **synthesizes a LiquidType table for vanilla** (Water/Ocean/
+  Magma/Slime + Green Lava, WotLK 45-field layout via `DBCFile::loadFromMemory`) pointing at the
+  animated `XTextures\...` sets every 1.12 client ships — so MCLQ water renders and the water tool
+  gets a working liquid list.
 - **Liquid load** (`liquid_layer.cpp` `changeLiquidID`): with no LiquidType.dbc, `getByID()` threw
   `NotFound` for *every* water chunk — 22k+ throw/catch/log cycles when loading a full continent
   (Eastern Kingdoms), which brought the app down under the load. Check existence first and default
