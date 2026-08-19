@@ -10,3 +10,6 @@
 /log.txt
 *.dmp
 noggit_fatal.txt
+
+# parked nested git dirs (submodules embedded as content)
+**/.git-parked/
