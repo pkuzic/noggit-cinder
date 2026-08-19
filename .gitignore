@@ -1,0 +1,12 @@
+
+/out
+/bin
+/build
+/.vs
+/CMakePresets.json
+/CMakeUserPresets.json
+
+# runtime artifacts in repo root
+/log.txt
+*.dmp
+noggit_fatal.txt

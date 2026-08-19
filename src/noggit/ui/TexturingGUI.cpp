@@ -1,0 +1,235 @@
+// This file is part of Noggit3, licensed under GNU General Public License (version 3).
+
+#include <noggit/ui/TexturingGUI.h>
+#include <noggit/application/NoggitApplication.hpp>
+#include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
+#include <noggit/project/CurrentProject.hpp>
+#include <noggit/TextureManager.h> // TextureManager, Texture
+#include <noggit/ui/TextureList.hpp>
+
+#include <ClientData.hpp>
+
+#include <QtCore/QSortFilterProxyModel>
+#include <QtGui/QStandardItemModel>
+#include <QtWidgets/QCheckBox>
+#include <QtWidgets/QComboBox>
+#include <QtWidgets/QVBoxLayout>
+
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+namespace Noggit
+{
+  namespace Ui
+  {
+    struct model_item : QStandardItem
+    {
+      model_item (QString const& display_role)
+        : QStandardItem (display_role)
+      {}
+
+      virtual QVariant data (int role) const
+      {
+        if (role == Qt::DecorationRole)
+        {
+          if (!_rendered)
+          {
+            //! \note The one time Qt is const correct and we don't want that.
+            auto that (const_cast<model_item*> (this));
+            that->_rendered = true;
+            that->_pixmap = *BLPRenderer::getInstance().render_blp_to_pixmap (data (Qt::DisplayRole).toString().prepend ("tileset/").toStdString(), 256, 256);
+          }
+          return QIcon(_pixmap);
+        }
+
+        return QStandardItem::data (role);
+      }
+
+      bool _rendered = false;
+      QPixmap _pixmap;
+    };
+
+    tileset_chooser::tileset_chooser (QWidget* parent)
+      : widget (parent, Qt::Window)
+    {
+      setWindowTitle ("Texture palette");
+      setWindowIcon (QIcon (":/icon"));
+      setMinimumHeight(490);
+
+      std::vector<std::string> tilesets;
+      std::unordered_set<std::string> tilesets_with_specular_variant;
+
+      // If modern features are enabled, set filtering to height textures (_h), otherwise specular (_s).
+      bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
+
+      for (auto const& entry_pair : Application::NoggitApplication::instance()->clientData()->listfile()->pathToFileDataIDMap())
+      {
+        std::string const& filepath = entry_pair.first;
+
+        if ( filepath.find ("tileset") != std::string::npos
+          && filepath.find (".blp") != std::string::npos
+           )
+        {
+          auto suffix_pos (filepath.find (modern_features ? "_h.blp" : "_s.blp"));
+          if (suffix_pos == std::string::npos)
+          {
+            tilesets.emplace_back (filepath);
+          }
+          else
+          {
+            std::string specular (filepath);
+            specular.erase (suffix_pos, strlen (modern_features ? "_h" : "_s"));
+            tilesets_with_specular_variant.emplace (specular);
+          }
+        }
+      }
+
+      {
+
+        auto const prefix (std::filesystem::path ( Noggit::Project::CurrentProject::get()->ProjectPath ));
+        auto const prefix_size (prefix.string().length());
+
+        if (std::filesystem::exists (prefix))
+        {
+          for ( auto const& entry_abs : std::filesystem::recursive_directory_iterator (prefix))
+          {
+            auto entry ( BlizzardArchive::ClientData::normalizeFilenameInternal(
+                entry_abs.path().string().substr(prefix_size))
+                       );
+
+            if ( entry.find ("tileset") != std::string::npos
+              && entry.find (".blp") != std::string::npos
+              && entry.find("_h.blp") == std::string::npos // skip _h textures
+               )
+            {
+              auto suffix_pos (entry.find (modern_features ? "_h.blp" : "_s.blp"));
+              if (suffix_pos == std::string::npos)
+              {
+                tilesets.emplace_back (entry);
+              }
+              else
+              {
+                std::string specular (entry);
+                specular.erase (suffix_pos, strlen (modern_features ? "_h" : "_s"));
+                tilesets_with_specular_variant.emplace (specular);
+              }
+            }
+          }
+        }
+      }
+
+
+      auto model (new QStandardItemModel);
+      constexpr int const has_specular_role = Qt::UserRole;
+
+      for (auto const& texture : tilesets)
+      {
+        auto item ( new model_item
+                      (QString::fromStdString (texture).remove ("tileset/"))
+                  );
+        item->setData ( tilesets_with_specular_variant.count (texture) ? "true" : "false"
+                      , has_specular_role
+                      );
+        model->appendRow (item);
+      }
+
+      auto texture_filter (new QSortFilterProxyModel);
+      texture_filter->setSourceModel (model);
+      texture_filter->setFilterRole (has_specular_role);
+
+      auto search_filter (new QSortFilterProxyModel);
+      search_filter->setSourceModel (texture_filter);
+      search_filter->sort (0, Qt::AscendingOrder);
+
+
+      auto filter (new QComboBox);
+      filter->setEditable (true);
+      filter->addItems ( { "", "base", "brick", "brush", "bush", "cobblestone"
+                         , "crack", "creep", "crop", "crystal", "dark", "dead"
+                         , "dirt", "fern", "floor", "flower", "footprints"
+                         , "grass", "ice", "ivy", "lava", "leaf", "light"
+                         , "mineral", "moss", "mud", "needle", "pebbl", "road"
+                         , "rock", "root", "rubble", "sand", "shore", "slime"
+                         , "smooth", "snow", "water", "waves", "web", "weed"
+                         }
+                       );
+      connect ( filter, &QComboBox::currentTextChanged
+              , [=] (QString text)
+                {
+                  search_filter->setFilterRegExp (text);
+                }
+              );
+
+      auto texture_filter_box(new QCheckBox("only with specular texture variant"));
+
+      if (modern_features)
+          texture_filter_box->setText("only with height texture variant");
+
+      connect(texture_filter_box, &QCheckBox::toggled
+          , [=](bool on)
+          {
+              texture_filter->setFilterRegExp(on ? "true" : "");
+          }
+      );
+
+      texture_filter_box->setChecked(true);
+
+      auto list = new TextureList(this);
+      list->setEditTriggers (QAbstractItemView::NoEditTriggers);
+      list->setViewMode (QListView::IconMode);
+      list->setMovement (QListView::Static);
+      list->setResizeMode (QListView::Adjust);
+      list->setUniformItemSizes (true);
+      list->setIconSize ({128, 128});
+      list->setWrapping (true);
+      list->setModel (search_filter);
+
+      connect(list->selectionModel(), &QItemSelectionModel::selectionChanged,
+        [=]() 
+        {
+          QModelIndexList selectedIndexes = list->selectionModel()->selectedIndexes();
+          if (!selectedIndexes.isEmpty()) 
+          {
+            QModelIndex index = selectedIndexes.first();
+            emit selected("tileset/" + index.data().toString().toStdString());
+          }
+        });
+
+      auto size_slider (new QSlider (Qt::Horizontal));
+      size_slider->setRange (64, 256);
+      size_slider->setValue (128);
+      connect ( size_slider, &QSlider::valueChanged
+              , [=] (int size)
+                {
+                  list->setIconSize ({size, size});
+                }
+              );
+
+
+      auto layout (new QVBoxLayout (this));
+      auto top_bar (new QHBoxLayout);
+      layout->addLayout (top_bar);
+      top_bar->addWidget (size_slider);
+      top_bar->addStretch();
+      top_bar->addWidget (texture_filter_box);
+      top_bar->addWidget (filter);
+      layout->addWidget (list);
+
+      resize(155 * 5 + 35, height());
+    }
+
+    // selected_texture:
+    std::optional<scoped_blp_texture_reference> selected_texture::texture = std::nullopt;
+
+    std::optional<scoped_blp_texture_reference> selected_texture::get()
+    {
+      return selected_texture::texture; // TODO: something performance-hungry is going on here
+    }
+
+    void selected_texture::set (scoped_blp_texture_reference t)
+    {
+      selected_texture::texture = std::move (t);
+    }
+  }
+}

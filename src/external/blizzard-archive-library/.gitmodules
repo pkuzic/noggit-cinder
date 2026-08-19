@@ -1,0 +1,4 @@
+[submodule "cmake"]
+	path = cmake
+	url = https://gitlab.com/prophecy-rp/build-dependencies.git
+	branch = dep-cmake

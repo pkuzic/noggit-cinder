@@ -1,0 +1,451 @@
+// This file is part of Noggit3, licensed under GNU General Public License (version 3).
+
+#pragma once
+
+#include <math/trig.hpp>
+#include <noggit/Selection.h>
+#include <noggit/map_horizon.h>
+#include <noggit/map_index.hpp>
+#include <noggit/world_tile_update_queue.hpp>
+#include <noggit/world_model_instances_storage.hpp>
+#include <noggit/ContextObject.hpp>
+#include <optional>
+#include <string>
+#include <unordered_set>
+#include <vector>
+#include <array>
+#include <noggit/rendering/WorldRender.hpp>
+#include <noggit/Occluders.h>
+
+namespace Noggit
+{
+  struct object_paste_params;
+  struct VertexSelectionCache;
+}
+
+namespace BlizzardDatabaseLib::Structures
+{
+  struct BlizzardDatabaseRow;
+}
+
+struct TileIndex;
+struct flatten_mode;
+
+class Brush;
+class MapTile;
+class QPixmap;
+class QProgressDialog;
+class QSettings;
+
+static const float detail_size = 8.0f;
+
+using StripType = uint16_t;
+
+
+class World
+{
+  friend class Noggit::Rendering::WorldRender;
+
+protected:
+  std::unordered_set<unsigned int> selected_uids; // fast lookup
+  std::vector<selection_type> _current_selection;
+  // std::unordered_map<std::string, std::vector<ModelInstance*>> _models_by_filename;
+  Noggit::world_model_instances_storage _model_instance_storage;
+  Noggit::world_tile_update_queue _tile_update_queue;
+  Noggit::OccluderStorage occluders;
+public:
+  std::vector<selection_group> _selection_groups;
+
+  MapIndex mapIndex;
+  Noggit::map_horizon horizon;
+
+  // Temporary variables for loading a WMO, if we have a global WMO.
+  std::string mWmoFilename;
+  ENTRY_MODF mWmoEntry;
+
+  unsigned int getMapID() const;
+
+  // Time of the day.
+  float animtime;
+  float time;
+
+  //! \brief Name of this map.
+  std::string basename;
+
+  explicit World(const std::string& name, int map_id, Noggit::NoggitRenderContext context, bool create_empty = false);
+
+  void LoadSavedSelectionGroups();
+
+  void saveSelectionGroups();
+
+  void setBasename(const std::string& name);
+
+  SceneObject* getObjectInstance(std::uint32_t uid);
+
+  void update_models_emitters(float dt);
+
+  unsigned int getAreaID (glm::vec3 const&);
+  void setAreaID(glm::vec3 const& pos, int id, bool adt,  float radius = -1.0f);
+
+  Noggit::NoggitRenderContext getRenderContext() const;;
+
+  selection_result intersect (glm::mat4x4 const& model_view
+                             , math::ray const&
+                             , const bool only_map
+                             , const bool do_objects
+                             , const bool draw_terrain
+                             , const bool draw_wmo
+                             , const bool draw_models
+                             , const bool draw_hidden_models
+                             , const bool draw_wmo_exterior
+                             , const bool animate
+                             , const bool first_object_occurence = false
+                             , const bool opaque_only_tris = false
+                             , const float obj_distance_max = 0.0f
+                             , const bool do_wmo_interiors = true
+                             );
+
+  MapChunk* getChunkAt(glm::vec3 const& pos);
+
+  bool isInIndoorWmoGroup(std::array<glm::vec3, 2> obj_bounds, glm::mat4x4 obj_transform);
+
+protected:
+  // Information about the currently selected model / WMO / triangle.
+  int _selected_model_count = 0;
+  std::optional<glm::vec3> _multi_select_pivot;
+public:
+
+  Noggit::Rendering::WorldRender* renderer();
+
+  void update_selection_pivot();
+  std::optional<glm::vec3> const& multi_select_pivot() const;
+
+  // Selection related methods.
+  bool is_selected(selection_type selection);
+  bool is_selected(std::uint32_t uid) const;
+  std::vector<selection_type> const& current_selection() const;
+  std::vector<selected_object_type> const get_selected_objects() const;
+  std::optional<selection_type> get_last_selected_model() const;
+  bool has_selection() const;
+  bool has_multiple_model_selected() const;
+  int get_selected_model_count() const;
+  // Unused in Red, models are now iterated by adt because of the occlusion check
+  // std::unordered_map<std::string, std::vector<ModelInstance*>> get_models_by_filename() const& { return _models_by_filename;  } 
+  void set_current_selection(selection_type entry);
+  bool add_to_selection(selection_type entry, bool skip_group = false, bool update_pivot = true);
+  void remove_from_selection(selection_type entry, bool skip_group = false, bool update_pivot = true);
+  void remove_from_selection(std::uint32_t uid, bool skip_group = false, bool update_pivot = true);
+  void reset_selection();
+  void delete_selected_models();
+  // note : height is Y axis.
+  glm::vec3 get_ground_height(glm::vec3 pos);
+  void range_add_to_selection(glm::vec3 const& pos, float radius, bool remove);
+  Noggit::world_model_instances_storage& getModelInstanceStorage();;
+
+  enum class object_scaling_type
+  {
+    set,
+    add,
+    mult
+  };
+
+  void snap_selected_models_to_the_ground();
+  void scale_selected_models(float v, object_scaling_type type);
+  void move_selected_models(float dx, float dy, float dz);
+  void move_model(selection_type entry, float dx, float dy, float dz);
+  void move_selected_models(glm::vec3 const& delta);
+  void set_selected_models_pos(float x, float y, float z, bool change_height = true);
+  void set_selected_models_pos(glm::vec3 const& pos, bool change_height = true);
+  void set_model_pos(selection_type entry, glm::vec3 const& pos, bool change_height = true);
+  void rotate_selected_models(math::degrees rx, math::degrees ry, math::degrees rz, bool use_pivot);
+  void rotate_selected_models_randomly(float minX, float maxX, float minY, float maxY, float minZ, float maxZ);
+  void set_selected_models_rotation(math::degrees rx, math::degrees ry, math::degrees rz);
+
+  void update_selected_model_groups();
+
+  // Checks the normal of the terrain on model origin and rotates to that spot.
+  void rotate_selected_models_to_ground_normal(bool smoothNormals);
+  void rotate_model_to_ground_normal(SceneObject* obj, bool smoothNormals);
+
+  bool GetVertex(float x, float z, glm::vec3 *V) const;
+
+  // check if the cursor is under map or in an unloaded tile
+  bool isUnderMap(glm::vec3 const& pos) const;
+
+  template<typename Fun>
+  bool for_all_chunks_in_range ( glm::vec3 const& pos
+                               , float radius
+                               , Fun&& /* MapChunk* -> bool changed */
+                               );
+  template<typename Fun, typename Post>
+  bool for_all_chunks_in_range ( glm::vec3 const& pos
+                               , float radius
+                               , Fun&& /* MapChunk* -> bool changed */
+                               , Post&& /* MapChunk* -> void; called for all changed chunks */
+                               );
+
+  template<typename Fun>
+  bool for_all_chunks_in_rect ( glm::vec3 const& pos
+    , float radius
+    , Fun&& /* MapChunk* -> bool changed */
+  );
+
+  template<typename Fun, typename Post>
+  bool for_all_chunks_in_rect (glm::vec3 const& pos
+    , float radius
+    , Fun&& /* MapChunk* -> bool changed */
+    , Post&& /* MapChunk* -> void; called for all changed chunks */
+  );
+
+  template<typename Fun>
+    void for_all_chunks_on_tile (glm::vec3 const& pos, Fun&&);
+
+    template<typename Fun>
+    void for_all_chunks_on_tile(MapTile* tile, Fun&& fun);
+
+  template<typename Fun>
+    void for_chunk_at(glm::vec3 const& pos, Fun&& fun);
+  template<typename Fun>
+    auto for_maybe_chunk_at (glm::vec3 const& pos, Fun&& fun) -> std::optional<decltype (fun (nullptr))>;
+
+  template<typename Fun>
+    void for_tile_at(const TileIndex& pos, Fun&&);
+
+  template<typename Fun>
+    void for_tile_at_force(const TileIndex& pos, Fun&&);
+
+  void changeObjectsWithTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius, bool iter_wmos_ = true, bool iter_m2s = true);
+  void changeTerrain(glm::vec3 const& pos, float change, float radius, int BrushType, float inner_radius);
+  std::vector<selected_object_type> getObjectsInRange(glm::vec3 const& pos, float radius, bool ignore_height = true, bool iter_wmos_ = true, bool iter_m2s = true);
+  void changeShader(glm::vec3 const& pos, glm::vec4 const& color, float change, float radius, bool editMode);
+  void stampShader(glm::vec3 const& pos, glm::vec4 const& color, float change, float radius, bool editMode, QImage* img, bool paint, bool use_image_colors);
+  glm::vec3 pickShaderColor(glm::vec3 const& pos);
+  void flattenTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode, const glm::vec3& origin, math::degrees angle, math::degrees orientation);
+  std::vector<std::pair<SceneObject*, float>> getObjectsGroundDistance(glm::vec3 const& pos, float radius, bool iter_wmos_, bool iter_m2s);
+  void blurTerrain(glm::vec3 const& pos, float remain, float radius, int BrushType, flatten_mode const& mode);
+  bool paintTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, scoped_blp_texture_reference texture);
+  bool stampTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, scoped_blp_texture_reference texture, QImage* img, bool paint);
+  bool sprayTexture(glm::vec3 const& pos, Brush *brush, float strength, float pressure, float spraySize, float sprayPressure, scoped_blp_texture_reference texture);
+  bool replaceTexture(glm::vec3 const& pos, float radius, scoped_blp_texture_reference const& old_texture, scoped_blp_texture_reference new_texture, bool entire_chunk = false, bool entire_tile = false);
+
+  void eraseTextures(glm::vec3 const& pos);
+  void overwriteTextureAtCurrentChunk(glm::vec3 const& pos, scoped_blp_texture_reference const& oldTexture, scoped_blp_texture_reference newTexture);
+  void paintGroundEffectExclusion(glm::vec3 const& pos, float radius, bool exclusion);
+  void setBaseTexture(glm::vec3 const& pos);
+  void clear_shadows(glm::vec3 const& pos);
+  void bake_shadows(glm::vec3 const& pos, int mode, const glm::mat4x4& view);
+  void clearTextures(glm::vec3 const& pos);
+  void swapTexture(glm::vec3 const& pos, scoped_blp_texture_reference tex);
+  void swapTextureGlobal(scoped_blp_texture_reference tex);
+  void removeTexture(glm::vec3 const& pos, scoped_blp_texture_reference tex);
+  void removeTexDuplicateOnADT(glm::vec3 const& pos);
+  void change_texture_flags(glm::vec3 const& pos, scoped_blp_texture_reference const& tex, std::size_t flags);
+
+  void setHole(glm::vec3 const& pos, float radius, bool big, bool hole);
+  void setHoleADT(glm::vec3 const& pos, bool hole);
+
+  void exportADTAlphamap(glm::vec3 const& pos);
+  void exportADTNormalmap(glm::vec3 const& pos);
+  void exportADTAlphamap(glm::vec3 const& pos, std::string const& filename);
+  void exportADTHeightmap(glm::vec3 const& pos, float min_height, float max_height);
+  void exportADTVertexColorMap(glm::vec3 const& pos);
+  void exportAllADTsAlphamap();
+  void exportAllADTsAlphamap(std::string const& filename);
+  void exportAllADTsHeightmap();
+  void exportAllADTsVertexColorMap();
+
+  void importADTAlphamap(glm::vec3 const& pos, QImage const& image, unsigned layer, bool cleanup);
+  void importADTAlphamap(glm::vec3 const& pos, bool cleanup);
+  void importADTHeightmap(glm::vec3 const& pos, QImage const& image, float min_height, float max_height, unsigned mode, bool tiledEdges);
+  void importADTHeightmap(glm::vec3 const& pos, float min_height, float max_height, unsigned mode, bool tiledEdges);
+  void importADTWatermap(glm::vec3 const& pos, QImage const& image, float min_height, float max_height, unsigned mode, bool tiledEdges);
+  void importADTVertexColorMap(glm::vec3 const& pos, int mode, bool tiledEdges);
+  void importADTVertexColorMap(glm::vec3 const& pos, QImage const& image, int mode, bool tiledEdges);
+
+  void importAllADTsAlphamaps(QProgressDialog* progress_dialog);
+  void importAllADTsHeightmaps(QProgressDialog* progress_dialog, float min_height, float max_height, unsigned mode, bool tiledEdges);
+  void importAllADTVertexColorMaps(unsigned mode, bool tiledEdges);
+
+  void ensureAllTilesetsADT(glm::vec3 const& pos);
+  void ensureAllTilesetsAllADTs();
+
+  void notifyTileRendererOnSelectedTextureChange();
+
+  void addM2 ( BlizzardArchive::Listfile::FileKey const& file_key
+             , glm::vec3 newPos
+             , float scale, math::degrees::vec3 rotation
+             , Noggit::object_paste_params*
+             , bool action
+             );
+  void addWMO ( BlizzardArchive::Listfile::FileKey const& file_key
+              , glm::vec3 newPos
+              , float scale, math::degrees::vec3 rotation
+              , Noggit::object_paste_params*
+              , bool action
+              );
+
+  ModelInstance* addM2AndGetInstance ( BlizzardArchive::Listfile::FileKey const& file_key
+      , glm::vec3 newPos
+      , float scale, math::degrees::vec3 rotation
+      , Noggit::object_paste_params*
+      , bool ignore_params
+      , bool action
+  );
+
+  WMOInstance* addWMOAndGetInstance ( BlizzardArchive::Listfile::FileKey const& file_key
+      , glm::vec3 newPos
+      , math::degrees::vec3 rotation
+      , float scale
+      , bool action
+  );
+
+  auto stamp(glm::vec3 const& pos, float dt, QImage const* img, float radiusOuter
+  , float radiusInner, int BrushType, bool sculpt) -> void;
+
+  // add a m2 instance to the world (needs to be positioned already), return the uid
+  std::uint32_t add_model_instance(ModelInstance model_instance, bool from_reloading, bool action);
+  // add a wmo instance to the world (needs to be positioned already), return the uid
+  std::uint32_t add_wmo_instance(WMOInstance wmo_instance, bool from_reloading, bool action);
+
+  std::optional<selection_type> get_model(std::uint32_t uid);
+  void remove_models_if_needed(std::vector<uint32_t> const& uids);
+
+  void reload_tile(TileIndex const& tile);
+
+  void updateTilesEntry(selection_type const& entry, model_update type);
+  void updateTilesEntry(SceneObject* entry, model_update type);
+  void updateTilesWMO(WMOInstance* wmo, model_update type);
+  void updateTilesModel(ModelInstance* m2, model_update type);
+  void wait_for_all_tile_updates();
+
+  void deleteModelInstance(int uid, bool action);
+  void deleteWMOInstance(int uid, bool action);
+  void deleteInstance(int uid, bool action);
+
+  bool uid_duplicates_found() const;
+  void delete_duplicate_model_and_wmo_instances();
+  // used after the uid fix all
+  void unload_every_model_and_wmo_instance();
+
+	static bool IsEditableWorld(BlizzardDatabaseLib::Structures::BlizzardDatabaseRow& record);
+
+  static bool IsWMOWorld(BlizzardDatabaseLib::Structures::BlizzardDatabaseRow& record);
+
+  void clearHeight(glm::vec3 const& pos);
+  void clearAllModelsOnADT(TileIndex const& tile, bool action);
+
+  // liquids
+  void paintLiquid( glm::vec3 const& pos
+                  , float radius
+                  , int liquid_id
+                  , bool add
+                  , math::radians const& angle
+                  , math::radians const& orientation
+                  , bool lock
+                  , glm::vec3 const& origin
+                  , bool override_height
+                  , bool override_liquid_id
+                  , float opacity_factor
+                  );
+  void CropWaterADT(const TileIndex& pos);
+  void setWaterType(const TileIndex& pos, int type, int layer);
+  int getWaterType(const TileIndex& tile, int layer) const;
+  void autoGenWaterTrans(const TileIndex&, float factor);
+
+
+  void fixAllGaps();
+
+  void CleanupEmptyTexturesChunks();
+  void convert_alphamap(QProgressDialog* progress_dialog, bool to_big_alpha);
+
+  bool deselectVertices(glm::vec3 const& pos, float radius);
+  void selectVertices(glm::vec3 const& pos, float radius);
+  void moveVertices(float h);
+  void orientVertices ( glm::vec3 const& ref_pos
+                      , math::degrees vertex_angle
+                      , math::degrees vertex_orientation
+                      );
+  void flattenVertices (float height);
+
+  void updateSelectedVertices();
+  void updateVertexCenter();
+  void clearVertexSelection();
+
+  void deleteObjects(std::vector<selected_object_type> const& types, bool action);
+
+  float getMaxTileHeight(const TileIndex& tile);
+
+  glm::vec3 const& vertexCenter();
+
+  void recalc_norms (MapChunk*) const;
+
+  Noggit::VertexSelectionCache getVertexSelectionCache();
+  void setVertexSelectionCache(Noggit::VertexSelectionCache& cache);
+
+  bool need_model_updates = false;
+
+  void loadAllTiles(glm::vec3& camera_pos);
+  unsigned getNumLoadedTiles() const;;
+  unsigned getNumRenderedTiles() const;;
+  unsigned getNumRenderedObjects() const;;
+
+  void select_objects_in_area(
+      const std::array<glm::vec2, 2>& selection_box, 
+      bool reset_selection,
+      const glm::mat4x4& view,
+      const glm::mat4x4& projection,
+      int viewport_width,
+      int viewport_height,
+      float user_depth,
+      const glm::vec3& camera_position
+  );
+
+
+  void add_object_group_from_selection();
+  // void remove_selection_group(selection_group* group);
+
+  void clear_selection_groups();
+
+private:
+  bool is_point_occluded_by_terrain(const glm::vec3& point
+    , const glm::mat4x4& view
+    , const glm::mat4& VPmatrix
+    , float viewport_width
+    , float viewport_height
+    , const glm::vec3& camera_position
+    , float distance_override = 0.0f);
+
+public:
+  bool paste_model_random_rotation = false;
+  bool paste_model_random_tilt = false;
+  bool paste_model_random_size = false;
+
+protected:
+  // void update_models_by_filename();
+
+  std::unordered_set<MapChunk*>& vertexBorderChunks();
+
+  std::unordered_set<MapTile*> _vertex_tiles;
+  std::unordered_set<MapChunk*> _vertex_chunks;
+  std::unordered_set<MapChunk*> _vertex_border_chunks;
+  std::unordered_set<glm::vec3*> _vertices_selected;
+  glm::vec3 _vertex_center;
+  bool _vertex_center_updated = false;
+  bool _vertex_border_updated = false;
+
+  QSettings* _settings;
+
+  Noggit::NoggitRenderContext _context;
+
+  std::array<std::pair<std::pair<int, int>, MapTile*>, 64 * 64 > _loaded_tiles_buffer;
+
+  Noggit::Rendering::WorldRender _renderer;
+
+  // Debug metrics
+  unsigned _n_loaded_tiles = 0;
+  unsigned _n_rendered_tiles = 0;;
+
+  // unsigned _n_loaded_objects; // done from instance storage size currently
+  unsigned _n_rendered_objects = 0;
+
+};
