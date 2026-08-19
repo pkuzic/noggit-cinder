@@ -17,8 +17,10 @@ function(windeployqt target)
 
     # debug configuration
     if (CMAKE_BUILD_TYPE STREQUAL "Debug" OR NOT DEFINED CMAKE_BUILD_TYPE)
+        # see the release branch below for why PATH is reduced to the Qt bin dir
         add_custom_command(TARGET ${target} POST_BUILD
-                COMMAND "${_qt_bin_dir}/windeployqt.exe"
+                COMMAND ${CMAKE_COMMAND} -E env "PATH=${_qt_bin_dir}"
+                "${_qt_bin_dir}/windeployqt.exe"
                 --verbose 1
                 --debug
                 --no-svg
@@ -43,8 +45,13 @@ function(windeployqt target)
         OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"
         OR NOT DEFINED CMAKE_BUILD_TYPE)
 
+        # run with PATH reduced to the Qt bin dir: windeployqt resolves the target's dependent
+        # DLLs via PATH, and a stray/broken Qt5*.dll elsewhere on the system PATH (e.g. an old
+        # PyQt install) makes it abort -- after which MSBuild cleans the step's outputs, leaving
+        # the exe without any Qt DLLs at all.
         add_custom_command(TARGET ${target} POST_BUILD
-                COMMAND "${_qt_bin_dir}/windeployqt.exe"
+                COMMAND ${CMAKE_COMMAND} -E env "PATH=${_qt_bin_dir}"
+                "${_qt_bin_dir}/windeployqt.exe"
                 --verbose 1
                 --release
                 --no-svg
