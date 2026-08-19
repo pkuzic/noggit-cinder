@@ -44,7 +44,12 @@ namespace Noggit
 
         private:
             const QString TemporaryFolder = "/temp";
-            const QString StorageURL = "https://raw.githubusercontent.com/Intemporel/NoggitRedBinaries/main/%1";
+            // DISARMED for Noggit Cinder: this used to point at the upstream Noggit RED binaries
+            // repo -- running the updater would have overwritten this fork's exe with an upstream
+            // build (no 1.12 support). The updater is already never instantiated (commented out in
+            // NoggitProjectSelectionWindow), and this URL now points at the Cinder repo, which
+            // hosts no binary manifest -- so even a re-enabled updater cannot fetch anything.
+            const QString StorageURL = "https://raw.githubusercontent.com/pkuzic/noggit-cinder/main/%1";
             const QString FileURL = "%1%2/%3";
             const QString ExternalProcess = "/noggit-updater.exe";
 

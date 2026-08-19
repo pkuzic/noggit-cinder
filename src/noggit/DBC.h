@@ -86,6 +86,25 @@ public:
   static const size_t RaidOffset = 64; //	Integer
   static const size_t NumberOfPlayers = 65; //	Integer	Used for reset time?
 
+  // Vanilla (1.12) Map.dbc layout -- 42 fields; empirically verified against Turtle 5875
+  // (MinLevel/MaxLevel/MaxPlayers cross-checked on WSG 10/60/10, AB 20/60/15, AV 51/60/40;
+  //  AreaTableID via WSG=3277 / AB=3358). Writing the WotLK indices above into a vanilla
+  //  record would land past the 42-field record -- use these for VANILLA projects.
+  static const size_t V_InternalName = 1;            // string
+  static const size_t V_AreaType = 2;                // uint (instance type; 3 = battleground)
+  static const size_t V_IsPvP = 3;                   // uint (1 on battlegrounds)
+  static const size_t V_Name = 4;                    // loc8 (4..11) + mask (12)
+  static const size_t V_MinLevel = 13;               // uint
+  static const size_t V_MaxLevel = 14;               // uint
+  static const size_t V_MaxPlayers = 15;             // uint
+  static const size_t V_UnkNeg1 = 16;                // uint, -1 on every stock row
+  static const size_t V_AreaTableID = 19;            // uint
+  static const size_t V_MapDescriptionHorde = 20;    // loc8 (20..27) + mask (28)
+  static const size_t V_MapDescriptionAlliance = 29; // loc8 (29..36) + mask (37)
+  static const size_t V_LoadingScreen = 38;          // uint [LoadingScreens.dbc]
+  static const size_t V_UnkFloat1 = 41;              // float, 1.0 on stock rows
+  static const unsigned V_LocaleMask = 4128830;      // 0x3F003E -- mask stock vanilla rows carry
+
   static std::string getMapName(int pMapID);
   static int findMapName(const std::string& map_name);
 };

@@ -399,6 +399,18 @@ void MapCreationWizard::createMapSettingsTab()
     _max_players = new QSpinBox(_map_settings);
     _max_players->setMaximum(std::numeric_limits<std::int32_t>::max());
     map_settings_layout->addRow("Max players:", _max_players);
+
+    if (Noggit::Project::CurrentProject::get()->projectVersion == Noggit::Project::ProjectVersion::VANILLA)
+    {
+      // these columns don't exist in the 1.12 Map.dbc -- the vanilla save path skips them
+      for (QWidget* wotlk_only : std::initializer_list<QWidget*>{
+             _sort_by_size_cat, _minimap_icon_scale, _corpse_map_id, _corpse_x, _corpse_y,
+             _time_of_day_override, _expansion_id, _raid_offset })
+      {
+        wotlk_only->setEnabled(false);
+        wotlk_only->setToolTip("Not present in the 1.12 Map.dbc -- not saved for vanilla projects.");
+      }
+    }
 }
 
 void MapCreationWizard::createDifficultyTab()
@@ -936,15 +948,20 @@ void MapCreationWizard::saveCurrentEntry()
     // save default global light.dbc entry for new maps
     try
     {
+        bool const is_vanilla = Noggit::Project::CurrentProject::get()->projectVersion
+                                  == Noggit::Project::ProjectVersion::VANILLA;
+
         int new_id = gLightDB.getEmptyRecordID();
         DBCFile::Record record = gLightDB.addRecord(new_id);
         record.write(LightDB::Map, _cur_map_id);
         // positions and falloffs should be defaulted to 0
-        // set some default light params to the same as eastern kingdom
+        // set some default light params to the same as eastern kingdoms.
+        // (vanilla Light.dbc has 12 fields with the same 5 param slots at DataIDs;
+        //  its stock EK global row is 12/13/10/11/4 -- storm water differs from wotlk)
         record.write(LightDB::DataIDs + 0, 12);// SKY_PARAM_CLEAR
         record.write(LightDB::DataIDs + 1, 13);//     CLEAR_WATER,
         record.write(LightDB::DataIDs + 2, 10);//     STORM,
-        record.write(LightDB::DataIDs + 3, 13);//     STORM_WATER,
+        record.write(LightDB::DataIDs + 3, is_vanilla ? 11 : 13);//     STORM_WATER,
         record.write(LightDB::DataIDs + 4, 4);//     DEATH,
 
         gLightDB.save();
@@ -961,24 +978,51 @@ void MapCreationWizard::saveCurrentEntry()
   {
     DBCFile::Record record = _is_new_record ? gMapDB.addRecord(_cur_map_id) : gMapDB.getByID(_cur_map_id);
 
-    record.writeString(MapDB::InternalName, _directory->text().toStdString());
+    bool const is_vanilla = Noggit::Project::CurrentProject::get()->projectVersion
+                              == Noggit::Project::ProjectVersion::VANILLA;
 
-    record.write(MapDB::AreaType, _instance_type->itemData(_instance_type->currentIndex()).toInt());
-    record.write(MapDB::Flags, _sort_by_size_cat->isChecked() ? 16 : 0 );
-    _map_name->toRecord(record, MapDB::Name);
+    if (is_vanilla)
+    {
+      // Vanilla Map.dbc: 42 fields with different indices -- writing the WotLK columns below
+      // would land past the record. Layout empirically verified, see MapDB::V_* in DBC.h.
+      int const instance_type = _instance_type->itemData(_instance_type->currentIndex()).toInt();
 
-    record.write(MapDB::AreaTableID, _area_table_id->value());
-    _map_desc_alliance->toRecord(record, MapDB::MapDescriptionAlliance);
-    _map_desc_horde->toRecord(record, MapDB::MapDescriptionHorde);
-    record.write(MapDB::LoadingScreen, _loading_screen->value());
-    record.write(MapDB::minimapIconScale, static_cast<float>(_minimap_icon_scale->value()));
-    record.write(MapDB::corpseMapID, _corpse_map_id->itemData(_corpse_map_id->currentIndex()).toInt());
-    record.write(MapDB::corpseX, static_cast<float>(_corpse_x->value()));
-    record.write(MapDB::corpseY, static_cast<float>(_corpse_y->value()));
-    record.write(MapDB::TimeOfDayOverride, _time_of_day_override->value());
-    record.write(MapDB::ExpansionID, _expansion_id->itemData(_expansion_id->currentIndex()).toInt());
-    record.write(MapDB::RaidOffset, _raid_offset->value());
-    record.write(MapDB::NumberOfPlayers, _max_players->value());
+      record.writeString(MapDB::V_InternalName, _directory->text().toStdString());
+      record.write(MapDB::V_AreaType, instance_type);
+      record.write(MapDB::V_IsPvP, instance_type == 3 ? 1 : 0);
+      _map_name->toRecord(record, MapDB::V_Name);
+      record.write(MapDB::V_Name + 8, MapDB::V_LocaleMask);
+      record.write(MapDB::V_MaxPlayers, _max_players->value());
+      record.write(MapDB::V_UnkNeg1, -1);
+      record.write(MapDB::V_AreaTableID, _area_table_id->value());
+      _map_desc_horde->toRecord(record, MapDB::V_MapDescriptionHorde);
+      record.write(MapDB::V_MapDescriptionHorde + 8, MapDB::V_LocaleMask);
+      _map_desc_alliance->toRecord(record, MapDB::V_MapDescriptionAlliance);
+      record.write(MapDB::V_MapDescriptionAlliance + 8, MapDB::V_LocaleMask);
+      record.write(MapDB::V_LoadingScreen, _loading_screen->value());
+      record.write(MapDB::V_UnkFloat1, 1.0f);
+    }
+    else
+    {
+      record.writeString(MapDB::InternalName, _directory->text().toStdString());
+
+      record.write(MapDB::AreaType, _instance_type->itemData(_instance_type->currentIndex()).toInt());
+      record.write(MapDB::Flags, _sort_by_size_cat->isChecked() ? 16 : 0 );
+      _map_name->toRecord(record, MapDB::Name);
+
+      record.write(MapDB::AreaTableID, _area_table_id->value());
+      _map_desc_alliance->toRecord(record, MapDB::MapDescriptionAlliance);
+      _map_desc_horde->toRecord(record, MapDB::MapDescriptionHorde);
+      record.write(MapDB::LoadingScreen, _loading_screen->value());
+      record.write(MapDB::minimapIconScale, static_cast<float>(_minimap_icon_scale->value()));
+      record.write(MapDB::corpseMapID, _corpse_map_id->itemData(_corpse_map_id->currentIndex()).toInt());
+      record.write(MapDB::corpseX, static_cast<float>(_corpse_x->value()));
+      record.write(MapDB::corpseY, static_cast<float>(_corpse_y->value()));
+      record.write(MapDB::TimeOfDayOverride, _time_of_day_override->value());
+      record.write(MapDB::ExpansionID, _expansion_id->itemData(_expansion_id->currentIndex()).toInt());
+      record.write(MapDB::RaidOffset, _raid_offset->value());
+      record.write(MapDB::NumberOfPlayers, _max_players->value());
+    }
 
     gMapDB.save();
 

@@ -235,8 +235,12 @@ a mere "failed load" while leaving corrupted state behind. The first-chance-AV m
   zone-light load is WOTLK-gated. Terrain/models render; ambient sky may be flat. Not a crash.
 - **M2 animation not parsed** for v256 (static bind pose). Fine for doodad placement; no animated
   preview.
-- **Map Creation Wizard** still writes WotLK-indexed `Map.dbc` columns — don't use it to author
-  vanilla `Map.dbc` rows without adjusting those indices.
+- ~~Map Creation Wizard writes WotLK-indexed `Map.dbc` columns~~ — fixed: for VANILLA projects
+  the wizard writes the empirically-verified 1.12 layout (see `MapDB::V_*` in `DBC.h`: Name at
+  col 4 loc8+mask, AreaTableID 19, descriptions 20/29, LoadingScreen 38, MinLevel/MaxLevel/
+  MaxPlayers 13-15, `-1` col 16, float `1.0` col 41), stamps the stock locale masks (0x3F003E),
+  writes the vanilla Light.dbc param set (12/13/10/11/4), and disables the WotLK-only inputs
+  (flags/minimap scale/corpse/time-of-day/expansion/raid offset) in the UI.
 - **Big-alpha → 4-bit**: a map imported from a WotLK WDT keeps `mBigAlpha`; run Noggit's alpha
   conversion before saving for a strict 1.12 client. Native/new vanilla maps are already 4-bit.
 - `ModelGeosetV256`'s tail (d5/d6/centre) beyond `vstart/vcount/istart/icount` is best-effort;
