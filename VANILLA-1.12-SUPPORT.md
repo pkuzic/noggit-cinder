@@ -1,6 +1,6 @@
-# Noggit Red — WoW 1.12 (Vanilla / Turtle) support
+# Noggit Cinder — WoW 1.12 (Vanilla / Turtle) support
 
-This branch teaches Noggit Red (a WotLK 3.3.5a editor) to **open a 1.12 client, read 1.12
+Noggit Cinder is a fork of Noggit Red (a WotLK 3.3.5a editor), taught to **open a 1.12 client, read 1.12
 (v256/257) M2 models, and read/edit/save 1.12 ADT terrain**. All vanilla behaviour is gated on
 a new `ProjectVersion::VANILLA` so WotLK/SL projects are unchanged.
 

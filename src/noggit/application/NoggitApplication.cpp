@@ -155,7 +155,7 @@ namespace Noggit::Application
 	  auto& listFilePath = applicationConfiguration.ApplicationListFilePath;
 	  if (!std::filesystem::exists(listFilePath))
 	  {
-		  // LogError << "Unable to find listfile! please reinstall Noggit Red, or download from wow.tools" << std::endl;
+		  // LogError << "Unable to find listfile! please reinstall Noggit Cinder, or download from wow.tools" << std::endl;
 	  }
 
 	  Log << "Listfile found! : " << listFilePath << std::endl;
@@ -163,7 +163,7 @@ namespace Noggit::Application
 	  auto& databaseDefinitionPath = applicationConfiguration.ApplicationDatabaseDefinitionsPath;
 	  if (!std::filesystem::exists(databaseDefinitionPath))
 	  {
-		  LogError << "Unable to find database definitions! please reinstall Noggit Red, or download from wow.tools" << std::endl;
+		  LogError << "Unable to find database definitions! please reinstall Noggit Cinder, or download from wow.tools" << std::endl;
 	  }
 		else
 		{

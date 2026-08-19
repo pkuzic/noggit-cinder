@@ -100,7 +100,7 @@
           </font>
          </property>
          <property name="text">
-          <string>Noggit Studio Red</string>
+          <string>Noggit Studio Cinder</string>
          </property>
          <property name="alignment">
           <set>Qt::AlignCenter</set>
@@ -137,7 +137,7 @@
           <bool>false</bool>
          </property>
          <property name="text">
-          <string>WoW map editor for 3.3.5a</string>
+          <string>WoW map editor for 3.3.5a &amp; 1.12</string>
          </property>
          <property name="alignment">
           <set>Qt::AlignCenter</set>

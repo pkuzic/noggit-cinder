@@ -1,3 +1,8 @@
+# Noggit Cinder #
+A World of Warcraft map editor for **3.3.5a and 1.12 (Vanilla / Turtle)** clients.
+Fork of [Noggit Red](https://gitlab.com/prophecy-rp/noggit-red/) with full vanilla
+client support and a stability overhaul — see `VANILLA-1.12-SUPPORT.md` for details.
+
 # Releases #
 Prebuilt executable are availables in the discord: https://discord.gg/NqvM3xE5uS
 
