@@ -139,9 +139,15 @@ std::optional<Archive::MPQArchive*> BlizzardArchive::ClientData::tryCreateMPQArc
     {
         // create archive here or in MPQ class ?
         HANDLE hMpq = NULL;
-        unsigned long dwMaxFileCount = 0x2000;// 0x1000 seems to be the default // 0x4 is the minimum
+        // NB: SFileAddFileEx SILENTLY drops files once the hash table is full -- size it with
+        // plenty of headroom (a full 64x64 continent is ~4k ADTs before minimaps/DBCs).
+        unsigned long dwMaxFileCount = 0x8000;// 0x1000 seems to be the default // 0x4 is the minimum
 
-        unsigned long dwCreateFlags = MPQ_CREATE_LISTFILE | MPQ_CREATE_ATTRIBUTES | MPQ_CREATE_ARCHIVE_V2; // v1 ?
+        // 1.12 clients only read MPQ format v1 -- a v2 archive is simply never mounted by the
+        // vanilla client (this is what made "Export project as patch" produce dead patches for
+        // classic projects). Later clients read both formats, so keep v2 for non-classic.
+        unsigned long dwCreateFlags = MPQ_CREATE_LISTFILE | MPQ_CREATE_ATTRIBUTES
+          | (_version == ClientVersion::CLASSIC ? MPQ_CREATE_ARCHIVE_V1 : MPQ_CREATE_ARCHIVE_V2);
 
         if (SFileCreateArchive(mpq_path.c_str(), dwCreateFlags, dwMaxFileCount, &hMpq))
         {
