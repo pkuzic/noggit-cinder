@@ -1,14 +1,15 @@
 #include "ui_Updater.h"
 #include "Updater.h"
 
-#include "qprocess.h"
-#include <qdir.h>
-#include <qdiriterator.h>
-#include <qfile.h>
-#include <QtNetwork/qnetworkaccessmanager.h>
-#include <QtNetwork/qnetworkreply.h>
-#include <QtNetwork/qnetworkrequest.h>
-
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QProcess>
+#include <QSettings>
+#include <QTextStream>
+#include <QtNetwork/QNetworkAccessManager>
+#include <QtNetwork/QNetworkReply>
+#include <QtNetwork/QNetworkRequest>
 
 namespace Noggit
 {
@@ -17,7 +18,7 @@ namespace Noggit
         CUpdater::CUpdater(QWidget* parent) :
             QDialog(parent)
         {
-            /*setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+            setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
             ui = new ::Ui::Updater;
             ui->setupUi(this);
 
@@ -26,26 +27,22 @@ namespace Noggit
             ui->ProgressDownload->hide();
             hide();
 
-            FileNeeded.clear();
-            LocalMD5.clear();
-            OnlineMD5.clear();
-
-            FileNeededCount = 0;
-            FileMissingCount = 0;
-
-            LocalCheck = false;
-            OnlineCheck = false;
-            NeedUpdate = false;
-
             // connect ui button to update or close
             connect(ui->Close, &QPushButton::clicked, this, [=]() { close(); });
             connect(ui->Update, &QPushButton::clicked, this, [=]() { DownloadUpdate(); });
 
-            QNetworkRequest request((QUrl(StorageURL.arg("MD5"))));
-            QNetworkReply* reply = (new QNetworkAccessManager)->get(request);
-            connect(reply, SIGNAL(finished()), this, SLOT(GenerateOnlineMD5()));
+            QSettings settings;
+            if (!settings.value("updater/enabled", true).toBool())
+            {
+                return;
+            }
 
-            GenerateLocalMD5();*/
+            StorageURL = settings.value("updater/url",
+                "https://updater.everwood.gg/launcher-updates/noggit-cinder/%1").toString();
+
+            QNetworkRequest request(GenerateLink("MD5"));
+            QNetworkReply* reply = (new QNetworkAccessManager(this))->get(request);
+            connect(reply, &QNetworkReply::finished, this, &CUpdater::GenerateOnlineMD5);
         }
 
         QByteArray CUpdater::FileMD5(const QString& filename, QCryptographicHash::Algorithm algo)
@@ -62,109 +59,65 @@ namespace Noggit
             return QByteArray();
         }
 
-        QString CUpdater::ToHashFile(const QString& name, const QString& hash)
-        {
-            return QString("%1 %2").arg(name, hash);
-        }
-
         QUrl CUpdater::GenerateLink(const QString& name)
         {
             return QUrl(StorageURL.arg(name));
         }
 
-        void CUpdater::GenerateLocalMD5()
-        {
-            QVector<QString> ignore = {
-                "md5",
-                "listfile.csv",
-                "log.txt"
-            };
-
-            QDirIterator it(QDir::currentPath(), QStringList() << "*", QDir::Files, QDirIterator::Subdirectories);
-            QFile MD5 = QDir::currentPath() + "/MD5";
-            if (MD5.open(QIODevice::WriteOnly))
-            {
-                QTextStream stream(&MD5);
-
-                while (it.hasNext())
-                {
-                    const QString file = it.next();
-
-                    if (ignore.contains(QFileInfo(file).fileName().toLower()))
-                        continue;
-
-                    QString name = file.mid(QDir::currentPath().size() + 1);
-                    QString hash = FileMD5(file, QCryptographicHash::Md5).toHex();
-
-                    LocalMD5[name] = hash;
-                    stream << ToHashFile(name, hash) << Qt::endl;
-                }
-
-                MD5.flush();
-                MD5.close();
-            }
-
-            LocalCheck = true;
-            CompareMD5();
-        }
-
         void CUpdater::GenerateOnlineMD5()
         {
             QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
-            if (!reply || reply->size() == 0xE)
+            if (!reply)
                 return;
 
-            QFile temp_md5(QDir::currentPath() + "online_MD5.txt");
-            if (temp_md5.open(QIODevice::WriteOnly))
+            reply->deleteLater();
+
+            // silent on ANY failure: an unreachable server or missing manifest must never
+            // bother the user -- noggit simply runs without updates.
+            if (reply->error() != QNetworkReply::NoError)
+                return;
+
+            for (QByteArray const& raw : reply->readAll().split('\n'))
             {
-                QTextStream stream(&temp_md5);
-                stream << reply->readAll();
-                temp_md5.flush();
-                temp_md5.close();
+                QString const line = QString::fromUtf8(raw).trimmed();
+                if (line.isEmpty())
+                    continue;
+
+                int const sep = line.lastIndexOf(' ');
+                if (sep <= 0)
+                    continue;
+
+                OnlineMD5[line.left(sep).trimmed()] = line.mid(sep + 1).trimmed();
             }
 
-            if (temp_md5.open(QIODevice::ReadOnly))
-            {
-                QTextStream stream(&temp_md5);
-
-                while (!stream.atEnd())
-                {
-                    QString line = stream.readLine();
-                    QStringList split = line.split(R"( )");
-                    OnlineMD5[split[0]] = split[1];
-                }
-
-                temp_md5.close();
-            }
-
-            QDir dir;
-            dir.remove(temp_md5.fileName());
-
-            OnlineCheck = true;
-            CompareMD5();
+            CompareWithLocal();
         }
 
-        void CUpdater::CompareMD5()
+        void CUpdater::CompareWithLocal()
         {
-            if (!LocalCheck || !OnlineCheck)
-                return;
-
+            // manifest-driven: hash only the files the manifest names. NEVER walk the install
+            // directory -- it holds the user's multi-gigabyte project folders.
             for (const auto& e : OnlineMD5.toStdMap())
             {
-                if (LocalMD5[e.first] != e.second)
+                QString const local_path = QDir::currentPath() + "/" + e.first;
+                QString const local_hash = QFile::exists(local_path)
+                    ? QString(FileMD5(local_path, QCryptographicHash::Md5).toHex())
+                    : QString();
+
+                if (local_hash != e.second)
                 {
                     FileNeeded.push_back(e.first);
 
                     if (ui->FileList->toPlainText().isEmpty())
                     {
-                        ui->FileList->append(QString(tr("This is all files needed to update.")));
+                        ui->FileList->append(QString(tr("Files to update:")));
                     }
 
-                    ui->FileList->append(QString(" - %1 [%2 => %3]").arg(FileNeeded.last()).arg(LocalMD5[e.first]).arg(e.second));
+                    ui->FileList->append(QString(" - %1").arg(e.first));
                 }
             }
 
-            if (FileNeeded.size() == 0)
+            if (FileNeeded.isEmpty())
             {
                 NeedUpdate = false;
                 return;
@@ -173,14 +126,11 @@ namespace Noggit
             FileNeededCount = FileNeeded.size();
             NeedUpdate = true;
 
-            if (NeedUpdate)
-            {
-                ui->ProgressFile->setMaximum(FileNeededCount);
-                ui->ProgressFile->setFormat(QString(tr("File %v/%1")).arg(FileNeededCount));
-                ui->ProgressFile->show();
+            ui->ProgressFile->setMaximum(FileNeededCount);
+            ui->ProgressFile->setFormat(QString(tr("File %v/%1")).arg(FileNeededCount));
+            ui->ProgressFile->show();
 
-                emit OpenUpdater();
-            }
+            emit OpenUpdater();
         }
 
         void CUpdater::DownloadUpdate()
@@ -191,14 +141,14 @@ namespace Noggit
             ui->ProgressDownload->show();
 
             QNetworkRequest request(GenerateLink(FileNeeded[0]));
-            QNetworkReply* reply = (new QNetworkAccessManager)->get(request);
+            QNetworkReply* reply = (new QNetworkAccessManager(this))->get(request);
             connect(reply, &QNetworkReply::downloadProgress, reply, [this](qint64 received, qint64 total)
                 {
                     ui->ProgressDownload->setMaximum(total);
                     ui->ProgressDownload->setValue(received);
                 });
 
-            connect(reply, SIGNAL(finished()), this, SLOT(GetOnlineFile()));
+            connect(reply, &QNetworkReply::finished, this, &CUpdater::GetOnlineFile);
 
             ui->FileList->append(QString(tr("Downloading : %1")).arg(FileNeeded[0]));
         }
@@ -209,7 +159,10 @@ namespace Noggit
 
             ui->ProgressFile->setValue(ui->ProgressFile->value() + 1);
 
-            if (!reply || reply->size() == 0xE)
+            if (reply)
+                reply->deleteLater();
+
+            if (!reply || reply->error() != QNetworkReply::NoError)
             {
                 FileMissingCount += 1;
                 FileNeeded.removeAt(0);
@@ -219,23 +172,22 @@ namespace Noggit
                     return;
                 }
 
-                StartExternalUpdater();
+                ApplyUpdateAndRestart();
                 return;
             }
 
             QDir dir;
-            if (!dir.exists(QDir::currentPath() + TemporaryFolder))
-                dir.mkpath(QDir::currentPath() + TemporaryFolder);
+            QString const temp_root = QDir::currentPath() + TemporaryFolder;
+            if (!dir.exists(temp_root))
+                dir.mkpath(temp_root);
 
-            auto index = FileNeeded[0].lastIndexOf(R"(/)");
+            auto index = FileNeeded[0].lastIndexOf('/');
             if (index >= 0)
             {
-                QDir dir;
-                if (!dir.exists(FileURL.arg(QDir::currentPath(), TemporaryFolder, FileNeeded[0].mid(0, index))))
-                    dir.mkpath(FileURL.arg(QDir::currentPath(), TemporaryFolder, FileNeeded[0].mid(0, index)));
+                dir.mkpath(temp_root + "/" + FileNeeded[0].left(index));
             }
 
-            QFile file = FileURL.arg(QDir::currentPath(), TemporaryFolder, FileNeeded[0]);
+            QFile file(temp_root + "/" + FileNeeded[0]);
             if (file.open(QIODevice::WriteOnly))
             {
                 file.write(reply->readAll());
@@ -250,10 +202,10 @@ namespace Noggit
                 return;
             }
 
-            StartExternalUpdater();
+            ApplyUpdateAndRestart();
         }
 
-        void CUpdater::StartExternalUpdater()
+        void CUpdater::ApplyUpdateAndRestart()
         {
             if (!NeedUpdate)
                 return;
@@ -261,13 +213,29 @@ namespace Noggit
             if (FileNeededCount == FileMissingCount)
                 return;
 
+            // noggit.exe is locked while we run. Write a script that waits for the lock to
+            // clear (a same-name rename only succeeds once the process is gone), moves the
+            // downloaded files over the install, restarts noggit and deletes itself.
+            QString const script_path = QDir::currentPath() + "/apply_update.cmd";
+            QFile script(script_path);
+            if (!script.open(QIODevice::WriteOnly | QIODevice::Text))
+                return;
+
             {
-                QString exec(QDir::currentPath() + ExternalProcess);
-                QProcess process;
-                process.setProgram(exec);
-                process.startDetached();
-                QCoreApplication::quit();
+                QTextStream ts(&script);
+                ts << "@echo off\n";
+                ts << ":wait\n";
+                ts << "timeout /t 1 /nobreak >nul\n";
+                ts << "ren \"%~dp0noggit.exe\" noggit.exe 2>nul || goto wait\n";
+                ts << "robocopy \"%~dp0temp\" \"%~dp0.\" /E /MOVE /NFL /NDL /NJH /NJS >nul\n";
+                ts << "rd /s /q \"%~dp0temp\" 2>nul\n";
+                ts << "start \"\" \"%~dp0noggit.exe\"\n";
+                ts << "del \"%~f0\"\n";
             }
+            script.close();
+
+            QProcess::startDetached("cmd.exe", { "/c", script_path });
+            QCoreApplication::quit();
         }
     }
 }

@@ -11,6 +11,7 @@
 #include <noggit/ui/windows/projectSelection/components/RecentProjectsComponent.hpp>
 #include <noggit/ui/windows/projectSelection/NoggitProjectSelectionWindow.hpp>
 #include <noggit/ui/windows/settingsPanel/SettingsPanel.h>
+#include <noggit/ui/windows/updater/Updater.h>
 
 
 #include <QFile>
@@ -229,17 +230,16 @@ NoggitProjectSelectionWindow::NoggitProjectSelectionWindow(Noggit::Application::
                    }
   );
 
-  // !disable-update && !force-changelog
-  /*if (!_noggit_application->GetCommand(0) && !_noggit_application->GetCommand(1))
-  {
-      _updater = new Noggit::Ui::CUpdater(this);
+  // Noggit Cinder self-updater: checks the update server's manifest in the background and
+  // only surfaces the dialog when files actually differ. Silent when offline; kill switch in
+  // QSettings "updater/enabled".
+  _updater = new Noggit::Ui::CUpdater(this);
 
-      QObject::connect(_updater, &CUpdater::OpenUpdater, [=]()
-          {
-              _updater->setModal(true);
-              _updater->show();
-          });
-  }*/
+  QObject::connect(_updater, &CUpdater::OpenUpdater, [=]()
+      {
+          _updater->setModal(true);
+          _updater->show();
+      });
 
   // auto _set = new QSettings(this);
   //auto first_changelog = _set->value("first_changelog", false);
