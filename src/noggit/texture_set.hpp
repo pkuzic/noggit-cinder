@@ -8,6 +8,8 @@
 
 #include <cstdint>
 #include <array>
+#include <optional>
+#include <vector>
 
 class Brush;
 class MapTile;
@@ -39,6 +41,16 @@ struct layer_info
     uint32_t  effectID = 0xFFFFFFFF; // default value, see https://wowdev.wiki/ADT/v18#MCLY_sub-chunk
 };
 
+// Live texture preview for the stamp/chunk-mover ghost overlay (ported from Noggit Azure). The
+// data is produced by the stamp tool; rendering the translucent preview is an Azure-only
+// WorldRender feature not yet ported, so setChunkMoverTexturePreview below currently discards it.
+struct chunk_mover_texture_preview
+{
+  std::vector<scoped_blp_texture_reference> textures;
+  std::array<std::array<float, 64 * 64>, 3> alphamaps{};
+  std::array<std::uint32_t, 4> flags{};
+};
+
 class TextureSet
 {
 public:
@@ -50,6 +62,9 @@ public:
   int addTexture(scoped_blp_texture_reference texture);
   void eraseTexture(size_t id);
   void eraseTextures();
+  // Stamp/chunk-mover ghost preview: accepted no-op in Cinder (the Azure overlay renderer that
+  // consumes this isn't ported yet). Kept so the ported stamp tool compiles and runs 1:1.
+  void setChunkMoverTexturePreview(std::optional<chunk_mover_texture_preview>) {}
   // return true if at least 1 texture has been erased
   bool eraseUnusedTextures();
   void swap_layers(int layer_1, int layer_2);

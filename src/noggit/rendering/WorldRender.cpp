@@ -1778,6 +1778,21 @@ void WorldRender::updateLightingUniformBlockMinimap(MinimapRenderSettings* setti
   gl.bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(OpenGL::LightingUniformBlock), &_lighting_ubo_data);
 }
 
+// Painted-stamp selection overlay: accepted no-ops (see WorldRender.hpp). The stamp tool still
+// tracks/applies its painted source selection; only the viewport highlight is absent until the
+// Azure overlay renderer is ported to Cinder.
+void WorldRender::updatePaintedStampSelectionOverlay(std::vector<glm::ivec2> const&, bool)
+{
+}
+
+void WorldRender::clearPaintedStampSelectionOverlay()
+{
+}
+
+void WorldRender::preparePaintedStampSelectionOverlay()
+{
+}
+
 void WorldRender::updateTerrainParamsUniformBlock()
 {
   ZoneScoped;

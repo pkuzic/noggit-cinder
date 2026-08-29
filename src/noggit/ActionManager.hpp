@@ -58,6 +58,8 @@ namespace Noggit
       void addedAction(Action* action);
       void purged();
       void currentActionChanged(unsigned index);
+      // emitted on undo()/redo() so tools (e.g. the stamp preview) can drop transient state
+      void historyNavigated();
       void onActionBegin(Action* action);
       void onActionEnd(Action* action);
 

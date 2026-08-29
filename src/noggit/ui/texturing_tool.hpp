@@ -70,6 +70,10 @@ namespace Noggit
     {
         Q_OBJECT
     public:
+      // Brush shape for the BrushStack. Square-brush texture painting (Azure) isn't wired into
+      // Cinder's paint math yet, so this reports CIRCLE for now. TODO: shape toggle + square paint.
+      BrushShape brushShape() const { return BrushShape::CIRCLE; }
+
       texturing_tool ( const glm::vec3* camera_pos
                      , MapView* map_view
                      , BoolToggleProperty* show_quick_palette

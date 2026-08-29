@@ -161,6 +161,7 @@ void ActionManager::undo()
 
   _undo_index++;
   emit currentActionChanged(_undo_index);
+  emit historyNavigated();
 }
 
 void ActionManager::redo()
@@ -180,6 +181,7 @@ void ActionManager::redo()
 
   _undo_index--;
   emit currentActionChanged(_undo_index);
+  emit historyNavigated();
 }
 
 ActionManager::~ActionManager()

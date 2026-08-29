@@ -16,6 +16,7 @@
 #include <noggit/rendering/Primitives.hpp>
 
 #include <memory>
+#include <vector>
 
 namespace OpenGL
 {
@@ -78,6 +79,14 @@ namespace Noggit::Rendering
 
     void upload() override;
     void unload() override;
+
+    // Painted-stamp source-selection overlay. The visual overlay itself (the translucent
+    // highlight of selected cells) is an Azure render feature not yet ported to Cinder, so
+    // these are accepted no-ops: the stamp tool still tracks and applies the selection, it
+    // just isn't highlighted in the viewport.
+    void updatePaintedStampSelectionOverlay(std::vector<glm::ivec2> const& cells, bool selected);
+    void clearPaintedStampSelectionOverlay();
+    void preparePaintedStampSelectionOverlay();
 
     void draw (glm::mat4x4 const& model_view
         , glm::mat4x4 const& projection

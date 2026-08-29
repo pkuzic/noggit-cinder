@@ -12,6 +12,7 @@
 #include <QImage>
 
 #include <array>
+#include <optional>
 #include <map>
 #include <memory>
 #include <unordered_set>
@@ -120,6 +121,12 @@ private:
 public:
 
     TextureSet* getTextureSet() const;
+
+  // Stamp/chunk-mover ghost preview: accepted no-ops in Cinder (the Azure translucent-overlay
+  // renderer that reads these preview buffers isn't ported yet). Kept so the ported stamp tool
+  // compiles and runs 1:1 -- the stamp still applies for real; only the live preview is absent.
+  void setChunkMoverPreviewHeights(std::optional<std::array<float, mapbufsize>>) {}
+  void setChunkMoverPreviewNormals(std::optional<std::array<glm::vec3, mapbufsize>>) {}
 
   void draw ( math::frustum const& frustum
             , OpenGL::Scoped::use_program& mcnk_shader
