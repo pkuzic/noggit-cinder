@@ -146,6 +146,11 @@ namespace Noggit::Rendering
     [[nodiscard]]
     std::vector<ModelRenderPass> const& renderPasses() const;;
 
+    // detail doodads read model geometry outside the normal draw path and must trigger the
+    // lazy first-draw GL upload themselves (from Noggit Azure)
+    [[nodiscard]]
+    bool uploaded() const { return _uploaded; }
+
     void updateBoneMatrices();
 
     void initRenderPasses(ModelView const* view, ModelTexUnit const* tex_unit, ModelGeoset const* model_geosets);

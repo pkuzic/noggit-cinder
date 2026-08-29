@@ -10,6 +10,7 @@
 #include <noggit/Log.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapHeaders.h>
+#include <noggit/DetailDoodads.hpp>
 #include <noggit/MapTile.h> // MapTile
 #include <noggit/Misc.h>
 #include <noggit/ModelInstance.h>
@@ -2175,6 +2176,43 @@ void MapChunk::registerChunkUpdate(unsigned flags)
 {
   _chunk_update_flags |= flags;
   mt->registerChunkUpdate(flags);
+
+  // any edit that changes terrain/texture/holes invalidates the cached detail-doodad layout
+  if (flags & (ChunkUpdateFlags::VERTEX | ChunkUpdateFlags::ALPHAMAP | ChunkUpdateFlags::FLAGS
+             | ChunkUpdateFlags::HOLES | ChunkUpdateFlags::GROUND_EFFECT
+             | ChunkUpdateFlags::DETAILDOODADS_EXCLUSION))
+  {
+    _detail_doodad_stamp++;
+  }
+
+  if (flags & ChunkUpdateFlags::ALPHAMAP)
+  {
+    _doodad_mapping_needs_update = true;
+  }
+}
+
+Noggit::ChunkDetailDoodads* MapChunk::getDetailDoodads()
+{
+  if (!_detail_doodads)
+  {
+    _detail_doodads = std::make_unique<Noggit::ChunkDetailDoodads>();
+  }
+  return _detail_doodads.get();
+}
+
+std::uint32_t MapChunk::detailDoodadStamp() const
+{
+  return _detail_doodad_stamp;
+}
+
+bool MapChunk::doodadMappingNeedsUpdate() const
+{
+  return _doodad_mapping_needs_update;
+}
+
+void MapChunk::clearDoodadMappingNeedsUpdate()
+{
+  _doodad_mapping_needs_update = false;
 }
 
 void MapChunk::endChunkUpdates()

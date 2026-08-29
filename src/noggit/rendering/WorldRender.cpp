@@ -718,6 +718,73 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     }
   }
 
+  // ground-effect detail doodads: client-matching ground clutter per chunk, drawn like the
+  // client (merged buffers, terrain normal, MCCV/MCSH colour, distance fade). Ported from
+  // Noggit Azure. Only runs when models are drawn (not for minimap renders).
+  if (_draw_detail_doodads && render_settings.draw_models && !render_settings.minimap_render)
+  {
+    ZoneScopedN("World::draw() : Detail doodads");
+
+    if (!_detail_doodads_program)
+    {
+      _detail_doodads_program.reset
+          ( new OpenGL::program
+                { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("detail_doodad_vs") }
+                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("detail_doodad_fs") }
+                }
+          );
+      OpenGL::Scoped::use_program shader {*_detail_doodads_program.get()};
+      shader.bind_uniform_block("matrices", 0);
+      shader.bind_uniform_block("lighting", 1);
+      shader.uniform("tex", 0);
+    }
+
+    OpenGL::Scoped::use_program shader {*_detail_doodads_program.get()};
+    shader.uniform("fade_dist", _detail_doodad_distance);
+
+    // client draws these with no backface cull, depth-writing, alpha-keyed
+    OpenGL::Scoped::bool_setter<GL_CULL_FACE, GL_FALSE> const cull;
+    OpenGL::Scoped::bool_setter<GL_BLEND, GL_FALSE> const blend;
+    OpenGL::Scoped::depth_mask_setter<GL_TRUE> const depth_mask;
+
+    for (auto const& pair : _world->_loaded_tiles_buffer)
+    {
+      MapTile* tile = pair.second;
+      if (!tile)
+        break;
+
+      if (!tile->finishedLoading()
+        || tile->camDist() - static_cast<float>(TILE_RADIUS) / 2.f > _detail_doodad_distance)
+      {
+        continue;
+      }
+
+      for (int cx = 0; cx < 16; ++cx)
+      {
+        for (int cz = 0; cz < 16; ++cz)
+        {
+          MapChunk* chunk = tile->getChunk(cx, cz);
+
+          if (glm::distance(chunk->vcenter, camera_pos) > _detail_doodad_distance)
+            continue;
+
+          Noggit::ChunkDetailDoodads* cache = chunk->getDetailDoodads();
+
+          if (cache->chunk_stamp != chunk->detailDoodadStamp()
+            || cache->dbc_stamp != Noggit::DetailDoodads::dbcStamp()
+            || cache->density != _detail_doodad_density)
+          {
+            Noggit::DetailDoodads::generate(chunk, _detail_doodad_density, _world->_context, *cache,
+              _detail_doodad_preview.enabled ? &_detail_doodad_preview : nullptr);
+          }
+
+          _detail_doodads.drawChunk(shader, chunk, cache, frame);
+        }
+      }
+    }
+  }
+  _detail_doodads.endFrame(frame);
+
   // WMOs / map objects
   if (render_settings.draw_wmo || _world->mapIndex.hasAGlobalWMO())
   {
@@ -1745,6 +1812,8 @@ void WorldRender::unload()
   _m2_box_program.reset();
   _wmo_program.reset();
   _liquid_program.reset();
+  _detail_doodads_program.reset();
+  _detail_doodads.unload();
 
   _cursor_render.unload();
   _sphere_render.unload();

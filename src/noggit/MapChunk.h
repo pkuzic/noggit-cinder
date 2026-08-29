@@ -41,6 +41,8 @@ class ModelInstance;
 class TextureSet;
 class WMOInstance;
 
+namespace Noggit { struct ChunkDetailDoodads; }
+
 class QPixmap;
 
 using StripType = uint16_t;
@@ -241,4 +243,16 @@ public:
   void registerChunkUpdate(unsigned flags);
   void endChunkUpdates();
   unsigned getUpdateFlags() const;
+
+  // Detail-doodad (client ground-clutter) cache, regenerated when the chunk is edited,
+  // the ground-effect DBCs change, or the density setting moves. Ported from Noggit Azure.
+  Noggit::ChunkDetailDoodads* getDetailDoodads();
+  std::uint32_t detailDoodadStamp() const;
+  bool doodadMappingNeedsUpdate() const;
+  void clearDoodadMappingNeedsUpdate();
+
+private:
+  std::unique_ptr<Noggit::ChunkDetailDoodads> _detail_doodads;
+  std::uint32_t _detail_doodad_stamp = 0;
+  bool _doodad_mapping_needs_update = false;
 };

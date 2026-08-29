@@ -10,6 +10,8 @@
 #include <noggit/tool_enums.hpp>
 #include <noggit/rendering/CursorRender.hpp>
 #include <noggit/rendering/LiquidTextureManager.hpp>
+#include <noggit/rendering/DetailDoodadRender.hpp>
+#include <noggit/DetailDoodads.hpp>
 #include <noggit/map_horizon.h>
 #include <noggit/Sky.h>
 
@@ -157,6 +159,14 @@ namespace Noggit::Rendering
     std::unique_ptr<OpenGL::program> _wmo_program;
     std::unique_ptr<OpenGL::program> _liquid_program;
     std::unique_ptr<OpenGL::program> _occluder_program;
+    std::unique_ptr<OpenGL::program> _detail_doodads_program;
+
+    // ground-effect detail doodads (client ground clutter preview), ported from Noggit Azure
+    Noggit::Rendering::DetailDoodadRender _detail_doodads;
+    Noggit::DetailDoodadPreview _detail_doodad_preview;
+    bool _draw_detail_doodads = true;
+    int _detail_doodad_density = 16;    // client CVar groundEffectDensity, 16..256
+    float _detail_doodad_distance = 140.f;
 
     // horizon && skies && lighting
     std::unique_ptr<Noggit::map_horizon::render> _horizon_render;

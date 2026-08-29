@@ -179,6 +179,15 @@ public:
   [[nodiscard]]
   bool is_hidden() const;
 
+  // vanilla M2s carry embedded views (no external .skin), so a skin can never fail to load
+  bool skin_load_failed() const { return false; }
+
+  // read-only geometry/texture access for the detail-doodad batch builder (from Noggit Azure)
+  std::vector<ModelVertex> const& vertexData() const { return _vertices; }
+  std::vector<uint16_t> const& indexData() const { return _indices; }
+  std::vector<scoped_blp_texture_reference> const& textureRefs() const { return _textures; }
+  std::vector<uint16_t> const& textureLookup() const { return _texture_lookup; }
+
   void toggle_visibility();
   void show();
   void hide();
