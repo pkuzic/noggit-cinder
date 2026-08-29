@@ -143,11 +143,16 @@ std::optional<Archive::MPQArchive*> BlizzardArchive::ClientData::tryCreateMPQArc
         // plenty of headroom (a full 64x64 continent is ~4k ADTs before minimaps/DBCs).
         unsigned long dwMaxFileCount = 0x8000;// 0x1000 seems to be the default // 0x4 is the minimum
 
-        // 1.12 clients only read MPQ format v1 -- a v2 archive is simply never mounted by the
-        // vanilla client (this is what made "Export project as patch" produce dead patches for
-        // classic projects). Later clients read both formats, so keep v2 for non-classic.
-        unsigned long dwCreateFlags = MPQ_CREATE_LISTFILE | MPQ_CREATE_ATTRIBUTES
-          | (_version == ClientVersion::CLASSIC ? MPQ_CREATE_ARCHIVE_V1 : MPQ_CREATE_ARCHIVE_V2);
+        bool const is_classic = (_version == ClientVersion::CLASSIC);
+
+        // Match what real 1.12 patch archives look like. Turtle's own patches contain ONLY data
+        // files -- no (listfile), no (attributes). StormLib writes those two ENCRYPTED by
+        // default, which is the one structural difference an exported patch had from a stock
+        // one; drop them for classic so an exported archive is byte-shaped like a native patch.
+        // (Format v1 is kept for classic -- vanilla-era clients read it; Turtle reads both.)
+        unsigned long dwCreateFlags =
+            (is_classic ? MPQ_CREATE_ARCHIVE_V1
+                        : (MPQ_CREATE_LISTFILE | MPQ_CREATE_ATTRIBUTES | MPQ_CREATE_ARCHIVE_V2));
 
         if (SFileCreateArchive(mpq_path.c_str(), dwCreateFlags, dwMaxFileCount, &hMpq))
         {

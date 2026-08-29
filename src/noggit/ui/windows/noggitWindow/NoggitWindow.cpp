@@ -686,11 +686,42 @@ namespace Noggit::Ui::Windows
 
       mpq_patch_params_layout->addWidget(new QLabel("MPQ Name:", mpq_patch_params));
 
-      QLineEdit* mpq_patch_params_ledit = new QLineEdit("patch-A.MPQ", mpq_patch_params);
+      // Pick a patch slot that does NOT already exist on disk. Exporting to an existing name
+      // (the old default "patch-A.MPQ" collides with the client's own base Patch-A.MPQ) makes
+      // StormLib ADD the project files INTO that base archive instead of a fresh one -- the
+      // edits then live in a low-priority archive, get overridden by the client's other
+      // patches, and appear "not loaded" in game. Prefer the highest free letter (highest
+      // override priority), then a free number.
+      auto* export_client_data = Noggit::Application::NoggitApplication::instance()->clientData();
+      auto suggest_free_patch_name = [&]() -> QString
+      {
+          for (char c = 'z'; c >= 'a'; --c)
+          {
+              std::string const name = std::string("patch-") + c + ".mpq";
+              if (!export_client_data->mpqArchiveExistsOnDisk(name))
+                  return QString::fromStdString(name);
+          }
+          for (char c = '9'; c >= '4'; --c)
+          {
+              std::string const name = std::string("patch-") + c + ".mpq";
+              if (!export_client_data->mpqArchiveExistsOnDisk(name))
+                  return QString::fromStdString(name);
+          }
+          return "patch-9.mpq";
+      };
+
+      QString const default_patch_name = suggest_free_patch_name();
+      QLineEdit* mpq_patch_params_ledit = new QLineEdit(default_patch_name, mpq_patch_params);
       QSettings settings;
-      // saved last set patch name
-      mpq_patch_params_ledit->setText(settings.value("noggit_window/mpq_name", "patch-A.MPQ").toString());
+      // reuse the last name only if it is still a free slot, otherwise offer a fresh free one
+      QString const last_name = settings.value("noggit_window/mpq_name", default_patch_name).toString();
+      mpq_patch_params_ledit->setText(
+          export_client_data->mpqArchiveExistsOnDisk(last_name.toLower().toStdString())
+              ? default_patch_name : last_name);
       mpq_patch_params_layout->addWidget(mpq_patch_params_ledit);
+      mpq_patch_params_layout->addWidget(new QLabel(
+          "<font color=gray>Tip: use a NEW patch name. Exporting into an existing client patch\n"
+          "makes your edits load at low priority and get overridden.</font>", mpq_patch_params));
 
 
       QCheckBox* mpq_patch_params_locale_chk = new QCheckBox("Save DBC to Locale:", mpq_patch_params);
