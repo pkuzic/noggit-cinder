@@ -4,6 +4,7 @@
 #include <noggit/MapHeaders.h> // ENTRY_MDDF
 #include <noggit/Misc.h> // checkinside
 #include <noggit/Model.h> // Model, etc.
+#include <noggit/MissingObjectPlaceholder.hpp>
 #include <noggit/ModelInstance.h>
 #include <noggit/rendering/Primitives.hpp>
 #include <noggit/TextureManager.h>
@@ -181,9 +182,20 @@ void ModelInstance::intersect (glm::mat4x4 const& model_view
                               , bool first_occurence
                               , bool only_opaque_tris
                               )
-{  
-  if (!finishedLoading() || model->loading_failed())
+{
+  if (!finishedLoading())
     return;
+
+  // failed-to-load model: it's drawn as an error-cube placeholder, so make that cube
+  // selectable by ray-testing its display bounds (Turtle maps reference many WotLK-only
+  // models absent from a 1.12 client -- without this they'd be invisible AND unclickable).
+  if (model->loading_failed())
+  {
+    glm::vec3 const radius{Noggit::MissingObjectPlaceholder::m2_display_scale};
+    if (auto const distance = ray.intersect_bounds(pos - radius, pos + radius); distance && *distance >= 0.0f)
+      results->emplace_back(*distance, this);
+    return;
+  }
 
   ensureExtents();
 
@@ -279,7 +291,11 @@ void ModelInstance::recalcExtents()
 
   if (model->loading_failed())
   {
-    extents[0] = extents[1] = pos;
+    // placeholder error-cube bounds so culling/selection have a real radius
+    glm::vec3 const radius{Noggit::MissingObjectPlaceholder::m2_display_scale};
+    extents[0] = pos - radius;
+    extents[1] = pos + radius;
+    bounding_radius = Noggit::MissingObjectPlaceholder::m2_display_scale;
     _need_recalc_extents = false;
     return;
   }

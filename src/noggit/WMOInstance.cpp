@@ -9,6 +9,7 @@
 #include <noggit/scoped_blp_texture_reference.hpp>
 #include <noggit/TextureManager.h>
 #include <noggit/WMO.h> // WMO
+#include <noggit/MissingObjectPlaceholder.hpp>
 #include <noggit/WMOInstance.h>
 
 #include <opengl/shader.hpp>
@@ -236,8 +237,22 @@ void WMOInstance::draw ( OpenGL::Scoped::use_program& wmo_shader
 
 void WMOInstance::intersect (math::ray const& ray, selection_result* results, bool do_exterior, bool do_interior, bool first_occurence)
 {
-  if (!finishedLoading() || wmo->loading_failed())
+  if (!finishedLoading())
     return;
+
+  // failed-to-load WMO: drawn as an error-cube placeholder -> keep it selectable. Prefer the
+  // MODF-saved extents (they survive when the WMO file itself is unavailable), else a cube.
+  if (wmo->loading_failed())
+  {
+    auto const& bounds = getExtents();
+    glm::vec3 const radius{Noggit::MissingObjectPlaceholder::wmo_display_scale};
+    bool const has_bounds = Noggit::MissingObjectPlaceholder::valid_bounds(bounds[0], bounds[1]);
+    glm::vec3 const min = has_bounds ? bounds[0] : pos - radius;
+    glm::vec3 const max = has_bounds ? bounds[1] : pos + radius;
+    if (auto const distance = ray.intersect_bounds(min, max); distance && *distance >= 0.0f)
+      results->emplace_back(*distance, this);
+    return;
+  }
 
   ensureExtents();
 
@@ -359,7 +374,12 @@ void WMOInstance::recalcExtents()
 
   if (wmo->loading_failed())
   {
-      extents[0] = extents[1] = pos;
+      // MODF stores WMO extents, so retain the last saved box when the WMO itself is
+      // unavailable -- collapsing it would corrupt that box and the chunk refs on save.
+      if (Noggit::MissingObjectPlaceholder::valid_bounds(extents[0], extents[1]))
+        bounding_radius = glm::distance(extents[1], extents[0]) * 0.5f;
+      else
+        bounding_radius = Noggit::MissingObjectPlaceholder::wmo_display_scale;
       _need_recalc_extents = false;
       return;
   }

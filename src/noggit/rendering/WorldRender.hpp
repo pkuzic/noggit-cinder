@@ -14,8 +14,10 @@
 #include <noggit/Sky.h>
 
 #include <noggit/rendering/Primitives.hpp>
+#include <noggit/ModelManager.h> // scoped_model_reference
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace OpenGL
@@ -119,6 +121,10 @@ namespace Noggit::Rendering
     bool local_lightning;
 
   private:
+
+    // error-cube substitutes for models/WMOs that failed to load; created lazily on first use
+    std::optional<scoped_model_reference> _missing_m2_placeholder;
+    std::optional<scoped_model_reference> _missing_wmo_placeholder;
 
     void drawMinimap ( MapTile *tile
         , glm::mat4x4 const& model_view

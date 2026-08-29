@@ -9,6 +9,7 @@
 #include <noggit/DBC.h>
 #include <noggit/MapChunk.h>
 #include <noggit/MapTile.h>
+#include <noggit/MissingObjectPlaceholder.hpp>
 #include <noggit/TileIndex.hpp>
 #include <noggit/MinimapRenderSettings.hpp>
 #include <noggit/Misc.h>
@@ -468,6 +469,64 @@ void WorldRender::draw (glm::mat4x4 const& model_view
     {
       if (!pair.first->finishedLoading())
         continue;
+
+      if (pair.first->loading_failed())
+      {
+        // Failed-to-load object -> draw an error-cube placeholder so it stays visible AND
+        // selectable (Turtle maps reference many WotLK-only models a 1.12 client doesn't ship).
+        // Viewport diagnostic only: never bake placeholders into generated minimaps.
+        if (render_settings.minimap_render)
+          continue;
+
+        SceneObjectTypes const object_type = pair.second[0]->which();
+        bool const draw_placeholder = object_type == eMODEL ? render_settings.draw_models
+                                                            : render_settings.draw_wmo;
+        if (!draw_placeholder)
+          continue;
+
+        std::optional<scoped_model_reference>& placeholder =
+            object_type == eMODEL ? _missing_m2_placeholder : _missing_wmo_placeholder;
+        char const* placeholder_path = object_type == eMODEL
+            ? Noggit::MissingObjectPlaceholder::m2_model_path
+            : Noggit::MissingObjectPlaceholder::wmo_model_path;
+        float const placeholder_scale = object_type == eMODEL
+            ? Noggit::MissingObjectPlaceholder::m2_display_scale
+            : Noggit::MissingObjectPlaceholder::wmo_display_scale;
+
+        if (!placeholder.has_value())
+          placeholder.emplace(placeholder_path, _world->_context);
+
+        Model* placeholder_model = placeholder->get();
+
+        for (SceneObject* instance : pair.second)
+        {
+          instance->_rendered_last_frame = false;
+
+          // a placement can be referenced by several tiles -- process it once per frame
+          if (instance->frame == frame)
+          {
+            instance->_rendered_last_frame = true;
+            continue;
+          }
+          instance->frame = frame;
+
+          glm::vec3 const proxy_radius{placeholder_scale};
+          if (glm::distance(camera_pos, instance->pos) - placeholder_scale >= _cull_distance
+              || !frustum.intersects(instance->pos + proxy_radius, instance->pos - proxy_radius))
+          {
+            continue;
+          }
+
+          if (!placeholder_model->finishedLoading() || placeholder_model->loading_failed())
+            continue;
+
+          models_to_draw[placeholder_model].emplace_back(
+              Noggit::MissingObjectPlaceholder::transform(instance->pos, instance->dir, placeholder_scale));
+          instance->_rendered_last_frame = true;
+        }
+
+        continue;
+      }
 
       if (pair.second[0]->which() == eMODEL)
       {
