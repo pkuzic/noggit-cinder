@@ -21,6 +21,8 @@
 #include <noggit/ui/ModelImport.h>
 #include <noggit/ui/ObjectEditor.h>
 #include <noggit/ui/RotationEditor.h>
+#include <noggit/Compat112Check.hpp>
+#include <noggit/ui/Compat112Window.hpp>
 #include <noggit/ui/TexturePicker.h>
 #include <noggit/ui/TexturingGUI.h>
 #include <noggit/ui/Toolbar.h> // Noggit::Ui::toolbar
@@ -1029,6 +1031,28 @@ void MapView::setupAssistMenu()
       _world->ensureAllTilesetsADT(_camera.position);
       NOGGIT_ACTION_MGR->endAction();
 
+    }
+  );
+
+  assist_menu->addSeparator();
+  assist_menu->addAction(createTextSeparator("1.12 Compatibility"));
+  assist_menu->addSeparator();
+
+  ADD_ACTION_NS ( assist_menu
+  , "Check loaded tiles for 1.12 issues"
+  , [this]
+    {
+      auto findings = Noggit::check_112_compat(_world.get());
+      auto* window = new Noggit::Ui::Compat112Window(findings, this);
+      window->setAttribute(Qt::WA_DeleteOnClose);
+      connect ( window, &Noggit::Ui::Compat112Window::jumpToTile, this
+              , [this] (int tile_x, int tile_z)
+                {
+                  move_camera_with_auto_height
+                    (glm::vec3((tile_x + 0.5f) * TILESIZE, 0.0f, (tile_z + 0.5f) * TILESIZE));
+                }
+              );
+      window->show();
     }
   );
 
