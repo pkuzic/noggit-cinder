@@ -32,16 +32,12 @@ WMOInstance::WMOInstance(BlizzardArchive::Listfile::FileKey const& file_key, ENT
 
   uid = d->uniqueID;
 
-  bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
-
-  if (modern_features)
-  {
-      scale = static_cast<float>(d->scale) / 1024.0f;
-  }
-  else
-  {
-      scale = 1.0f;
-  }
+  // Per-instance WMO scaling (MODF.scale) is a Legion (7.0)+ client feature. NO pre-Legion
+  // client -- 1.12/Turtle OR 3.3.5 -- reads this field; they always render WMOs at native
+  // model size. Applying it in the editor only produced an editor-vs-game size mismatch, so
+  // WMO scale is deliberately ignored on load: every WMO displays at its true in-game size.
+  scale = 1.0f;
+  (void)d->scale;
 
   extents[0] = d->extents[0];
   extents[1] = d->extents[1];
@@ -62,6 +58,7 @@ WMOInstance::WMOInstance(BlizzardArchive::Listfile::FileKey const& file_key, Nog
   pos = glm::vec3(0.0f, 0.0f, 0.0f);
   dir = math::degrees::vec3(math::degrees(0)._, math::degrees(0)._, math::degrees(0)._);
   uid = 0;
+  scale = 1.0f; // WMO scale unsupported pre-Legion; never scale a newly placed WMO
   _context = context;
 
   _need_recalc_extents = true;

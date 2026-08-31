@@ -895,7 +895,9 @@ void MapTile::save(World* world, bool save_using_mclq_liquids)
     lMODF_Data[lID].flags = object->mFlags;
     lMODF_Data[lID].doodadSet = object->doodadset();
     lMODF_Data[lID].nameSet = object->mNameset;
-    lMODF_Data[lID].scale = (uint16_t)(object->scale * 1024);
+    // Always write native scale (1024 == 1.0). Pre-Legion clients ignore MODF.scale, and Noggit
+    // no longer scales WMOs, so this also normalises any previously-scaled WMOs on the next save.
+    lMODF_Data[lID].scale = 1024;
     lID++;
   }
 

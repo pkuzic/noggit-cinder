@@ -825,8 +825,6 @@ void World::scale_selected_models(float v, object_scaling_type type)
 
   v = std::clamp(v, SceneObject::min_scale(), SceneObject::max_scale());
 
-  bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
-
   for (auto& entry : _current_selection)
   {
     if (entry.index() == eEntry_Object)
@@ -835,39 +833,9 @@ void World::scale_selected_models(float v, object_scaling_type type)
 
       if (obj->which() != eMODEL)
       {
-          // If we are not using modern features, we don't want to scale WMOs
-        if(!modern_features)
-			    continue;
-
-        WMOInstance* wi = static_cast<WMOInstance*>(obj);
-
-        NOGGIT_CUR_ACTION->registerObjectTransformed(wi);
-
-        float scale = wi->scale;
-
-        switch (type)
-        {
-        case World::object_scaling_type::set:
-            scale = v;
-            break;
-        case World::object_scaling_type::add:
-            scale += v;
-            break;
-        case World::object_scaling_type::mult:
-            scale *= v;
-            break;
-        }
-
-        // if the change is too small, do nothing
-        if (std::abs(scale - wi->scale) < ModelInstance::min_scale())
-        {
-            continue;
-        }
-
-        updateTilesWMO(wi, model_update::remove);
-        wi->scale = std::min(ModelInstance::max_scale(), std::max(ModelInstance::min_scale(), scale));
-        wi->recalcExtents();
-        updateTilesWMO(wi, model_update::add);
+        // WMOs are never scaled: MODF.scale is a Legion+ field ignored by every client Noggit
+        // targets (1.12/Turtle and 3.3.5), so scaling one would only mislead in the editor.
+        continue;
       }
       else
       {
@@ -2230,14 +2198,11 @@ void World::addWMO ( BlizzardArchive::Listfile::FileKey const& file_key
           wmo_instance.dir.z += math::degrees(misc::randfloat(min, max))._;
       }
 
-      if (_settings->value("model/random_size", false).toBool())
-      {
-          float min = paste_params->minScale;
-          float max = paste_params->maxScale;
-          wmo_instance.scale = misc::randfloat(min, max);
-      }
+      // Random-size intentionally does NOT apply to WMOs: pre-Legion clients ignore WMO scale,
+      // so a scaled WMO would look wrong only in the editor. (Random-size still applies to M2s.)
   }
 
+  wmo_instance.scale = 1.0f;
 
   // to ensure the tiles are updated correctly
   wmo_instance.wmo->wait_until_loaded();
@@ -2259,7 +2224,8 @@ WMOInstance* World::addWMOAndGetInstance ( BlizzardArchive::Listfile::FileKey co
   wmo_instance.uid = mapIndex.newGUID();
   wmo_instance.pos = newPos;
   wmo_instance.dir = rotation;
-  wmo_instance.scale = scale;
+  wmo_instance.scale = 1.0f; // WMO scale unsupported pre-Legion; ignore any requested scale
+  (void)scale;
 
   // to ensure the tiles are updated correctly
   wmo_instance.wmo->wait_until_loaded();

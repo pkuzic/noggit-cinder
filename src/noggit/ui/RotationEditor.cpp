@@ -267,22 +267,9 @@ namespace Noggit
 
           auto obj = std::get<selected_object_type>(selection);
 
-          if(obj->which() == eWMO)
-          {
-            bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
-            if(modern_features)
-            {
-              _scale->setEnabled(true);
-            }
-            else
-            {
-              _scale->setEnabled(false);
-            }
-          }
-          else
-          {
-            _scale->setEnabled(true);
-          }
+          // WMO scale is not editable: pre-Legion clients ignore MODF.scale, so the field is
+          // disabled (and always reads 1.00) for WMOs and only active for M2 models.
+          _scale->setEnabled(obj->which() != eWMO);
 
           _position_x->setValue(obj->pos.x);
           _position_y->setValue(obj->pos.y);
