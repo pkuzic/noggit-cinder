@@ -722,6 +722,7 @@ void WorldRender::draw (glm::mat4x4 const& model_view
   // client (merged buffers, terrain normal, MCCV/MCSH colour, distance fade). Ported from
   // Noggit Azure. Only runs when models are drawn (not for minimap renders).
   if (_draw_detail_doodads && render_settings.draw_models && !render_settings.minimap_render)
+  try
   {
     ZoneScopedN("World::draw() : Detail doodads");
 
@@ -782,6 +783,21 @@ void WorldRender::draw (glm::mat4x4 const& model_view
         }
       }
     }
+  }
+  catch (std::exception const& e)
+  {
+    // a preview feature must NEVER take down the editor. Self-disable for the session so it
+    // can't keep throwing every frame (this is why it caused a hang-then-crash entering a full
+    // continent -- likely bad_alloc under the clutter-model volume).
+    LogError << "Detail doodads disabled after exception: " << e.what() << std::endl;
+    _draw_detail_doodads = false;
+    _detail_doodads.unload();
+  }
+  catch (...)
+  {
+    LogError << "Detail doodads disabled after unknown exception" << std::endl;
+    _draw_detail_doodads = false;
+    _detail_doodads.unload();
   }
   _detail_doodads.endFrame(frame);
 

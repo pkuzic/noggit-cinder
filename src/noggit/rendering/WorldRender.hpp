@@ -164,7 +164,11 @@ namespace Noggit::Rendering
     // ground-effect detail doodads (client ground clutter preview), ported from Noggit Azure
     Noggit::Rendering::DetailDoodadRender _detail_doodads;
     Noggit::DetailDoodadPreview _detail_doodad_preview;
-    bool _draw_detail_doodads = true;
+    // OFF by default: this preview generates+loads clutter models on the render thread and can
+    // throw (e.g. bad_alloc under the model volume of a full Blizzard continent). Opt-in via the
+    // QSettings key "draw_detail_doodads"; the render hook also self-disables on any exception so
+    // it can never crash the app. Re-enable by default once verified safe on large maps.
+    bool _draw_detail_doodads = false;
     int _detail_doodad_density = 16;    // client CVar groundEffectDensity, 16..256
     float _detail_doodad_distance = 140.f;
 
