@@ -284,6 +284,43 @@ namespace Noggit::Project
       _projectWriter->saveProject(this, std::filesystem::path(ProjectPath));
     }
 
+    namespace
+    {
+      // Patch names are ASCII; lower-case them without dragging in locale headers.
+      std::string patch_name_key(std::string s)
+      {
+        for (auto& ch : s)
+          if (ch >= 'A' && ch <= 'Z')
+            ch = static_cast<char>(ch - 'A' + 'a');
+        return s;
+      }
+    }
+
+    void NoggitProject::recordPatch(const NoggitProjectPatchRecord& record)
+    {
+      NoggitProjectPatchRecord stored = record;
+      stored.Name = patch_name_key(record.Name);
+
+      auto existing = std::find_if(Patches.begin(), Patches.end(),
+        [&](NoggitProjectPatchRecord const& p) { return patch_name_key(p.Name) == stored.Name; });
+
+      if (existing != Patches.end())
+        *existing = stored;
+      else
+        Patches.push_back(stored);
+
+      _projectWriter->saveProject(this, std::filesystem::path(ProjectPath));
+    }
+
+    NoggitProjectPatchRecord const* NoggitProject::findPatch(const std::string& name) const
+    {
+      std::string const key = patch_name_key(name);
+      for (auto const& p : Patches)
+        if (patch_name_key(p.Name) == key)
+          return &p;
+      return nullptr;
+    }
+
     void NoggitProject::deleteBookmark()
     {
     }

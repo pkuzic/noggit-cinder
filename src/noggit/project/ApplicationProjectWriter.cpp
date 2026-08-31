@@ -51,8 +51,20 @@ namespace Noggit::Project
       bookmarks.push_back(json_bookmark);
     }
 
+    auto patches = QJsonArray();
+    for (auto const& patch : project->Patches)
+    {
+      auto json_patch = QJsonObject();
+      json_patch.insert("Name", patch.Name.c_str());
+      json_patch.insert("Md5", patch.Md5.c_str());
+      json_patch.insert("Size", static_cast<double>(patch.Size));
+      json_patch.insert("BuiltAt", patch.BuiltAt.c_str());
+      patches.push_back(json_patch);
+    }
+
     project_configuration.insert("PinnedMaps", pinned_maps);
     project_configuration.insert("Bookmarks", bookmarks);
+    project_configuration.insert("Patches", patches);
     project_configuration.insert("ProjectName", project->ProjectName.c_str());
     project_configuration.insert("Client", client_configuration);
     // project_configuration.insert("TexturePalettes", texture_palettes);

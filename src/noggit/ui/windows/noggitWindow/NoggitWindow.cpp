@@ -46,6 +46,10 @@
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 #include <QtCore/QSettings>
+#include <QtCore/QCryptographicHash>
+#include <QtCore/QFile>
+#include <QtCore/QDateTime>
+#include <filesystem>
 
 #include <chrono>
 #include <sstream>
@@ -710,14 +714,10 @@ namespace Noggit::Ui::Windows
           return "patch-9.mpq";
       };
 
+      // Requirement 1: always offer the highest free patch letter (Z-ward), so a brand-new
+      // export lands in the highest-priority free slot without the user having to think about it.
       QString const default_patch_name = suggest_free_patch_name();
       QLineEdit* mpq_patch_params_ledit = new QLineEdit(default_patch_name, mpq_patch_params);
-      QSettings settings;
-      // reuse the last name only if it is still a free slot, otherwise offer a fresh free one
-      QString const last_name = settings.value("noggit_window/mpq_name", default_patch_name).toString();
-      mpq_patch_params_ledit->setText(
-          export_client_data->mpqArchiveExistsOnDisk(last_name.toLower().toStdString())
-              ? default_patch_name : last_name);
       mpq_patch_params_layout->addWidget(mpq_patch_params_ledit);
       mpq_patch_params_layout->addWidget(new QLabel(
           "<font color=gray>Tip: use a NEW patch name. Exporting into an existing client patch\n"
@@ -767,23 +767,101 @@ namespace Noggit::Ui::Windows
       QPushButton* mpq_patch_params_okay = new QPushButton("Save Project to Client MPQ", mpq_patch_params);
       mpq_patch_params_layout->addWidget(mpq_patch_params_okay);
 
+      // --- helpers for the replace / tamper gate (requirements 2 & 3) ---
+      // Absolute path of a client patch on disk: <ClientPath>/Data/<name>.
+      auto patch_disk_path = [export_client_data](std::string const& name) -> std::filesystem::path
+      {
+          return std::filesystem::path(export_client_data->path()) / "Data" / name;
+      };
+      // Stream a file through MD5 (mirrors the updater's FileMD5). Returns an empty string on
+      // failure -- e.g. the file is missing or locked by another program.
+      auto file_md5 = [](std::filesystem::path const& path) -> QString
+      {
+          QFile f(QString::fromStdString(path.string()));
+          if (!f.open(QIODevice::ReadOnly))
+              return QString();
+          QCryptographicHash hash(QCryptographicHash::Md5);
+          if (!hash.addData(&f))
+              return QString();
+          return QString::fromLatin1(hash.result().toHex());
+      };
+
       connect(mpq_patch_params_okay, &QPushButton::clicked
           , [=]()
           {
+              std::string const name = mpq_patch_params_ledit->text().toLower().toStdString();
+
               // check if mpq name is allowed
-              if (!Noggit::Application::NoggitApplication::instance()->clientData()->isMPQNameValid(mpq_patch_params_ledit->text().toLower().toStdString(), true))
+              if (!Noggit::Application::NoggitApplication::instance()->clientData()->isMPQNameValid(name, true))
               {
                   QMessageBox::warning(this, "Name Error", "MPQ Name is not allowed.\This name is already used by base client patches, or the client can't load it.\
                      \nYour patch must be named \"patch-[4-9].MPQ\" or \"patch-[A-Z].MPQ\".");
+                  return;
               }
-              else
-              {
-                QSettings settings;
-                settings.setValue("noggit_window/mpq_name", mpq_patch_params_ledit->text());
-                settings.sync();
 
-                mpq_patch_params->accept();
+              // Requirements 2 & 3: if a patch already exists on disk under this name, decide
+              // whether we are allowed to replace it.
+              std::filesystem::path const disk_path = patch_disk_path(name);
+              if (std::filesystem::exists(disk_path))
+              {
+                  Noggit::Project::NoggitProjectPatchRecord const* record =
+                      _project ? _project->findPatch(name) : nullptr;
+
+                  if (!record)
+                  {
+                      // Exists on disk but this project never built it -> a foreign / hand-made
+                      // patch. Refuse rather than silently modifying someone else's archive.
+                      QMessageBox::warning(this, "Patch not created by this project",
+                          QString("A patch named \"%1\" already exists in the client, but this project "
+                                  "did not create it.\n\nRefusing to modify it. Pick a different name, or "
+                                  "delete it manually first:\n%2")
+                              .arg(QString::fromStdString(name))
+                              .arg(QString::fromStdString(disk_path.string())));
+                      return;
+                  }
+
+                  QString const current_md5 = file_md5(disk_path);
+                  if (current_md5.isEmpty())
+                  {
+                      QMessageBox::warning(this, "Patch not readable",
+                          QString("Could not read \"%1\" to verify it -- it may be open in WoW or an MPQ "
+                                  "editor. Close anything using the client and try again.")
+                              .arg(QString::fromStdString(name)));
+                      return;
+                  }
+
+                  if (current_md5.compare(QString::fromStdString(record->Md5), Qt::CaseInsensitive) != 0)
+                  {
+                      // Requirement 3: on-disk hash differs from what we last wrote -> the file was
+                      // replaced or edited outside Noggit. Refuse; tell the user to delete it manually.
+                      QMessageBox::warning(this, "Patch changed outside Noggit",
+                          QString("Patch \"%1\" on disk no longer matches what this project last built "
+                                  "(it was replaced or edited outside Noggit).\n\n"
+                                  "To avoid clobbering those changes, Noggit will not rebuild it.\n"
+                                  "Delete it manually, then export again:\n%2")
+                              .arg(QString::fromStdString(name))
+                              .arg(QString::fromStdString(disk_path.string())));
+                      return;
+                  }
+
+                  // Requirement 3: hashes match -> this is our own patch; confirm the replace.
+                  double const size_mb = record->Size / (1024.0 * 1024.0);
+                  auto const answer = QMessageBox::question(this, "Replace existing patch",
+                      QString("This will replace the existing patch \"%1\"\n"
+                              "(built by this project on %2, %3 MB).\n\nContinue?")
+                          .arg(QString::fromStdString(name))
+                          .arg(QString::fromStdString(record->BuiltAt))
+                          .arg(size_mb, 0, 'f', 1),
+                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                  if (answer != QMessageBox::Yes)
+                      return;
               }
+
+              QSettings settings;
+              settings.setValue("noggit_window/mpq_name", mpq_patch_params_ledit->text());
+              settings.sync();
+
+              mpq_patch_params->accept();
           });
 
       // execute dialog, and run code when Mpq_patch_params_okay calls Mpq_patch_params->accept();
@@ -864,7 +942,24 @@ namespace Noggit::Ui::Windows
                           QMessageBox::information(this, "Archive Updated", std::format("Added {} files to existing Archive {} in {} seconds.\
                         \n{} Files failed.",  std::to_string(processed_files), archive_name, oss.str(), std::to_string(files_failed)).c_str());
 
+                      // Requirement 2: remember the patch we just built (name + hash + size + time)
+                      // so a future export can tell its own archive from one changed outside Noggit.
+                      if (_project && result[1] > 0)
+                      {
+                          std::filesystem::path const built_path =
+                              std::filesystem::path(clientData->path()) / "Data" / archive_name;
 
+                          Noggit::Project::NoggitProjectPatchRecord patch_record;
+                          patch_record.Name = archive_name;
+                          patch_record.Md5 = file_md5(built_path).toStdString();
+                          std::error_code ec;
+                          auto const built_size = std::filesystem::file_size(built_path, ec);
+                          patch_record.Size = ec ? 0 : static_cast<long long>(built_size);
+                          patch_record.BuiltAt =
+                              QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm").toStdString();
+
+                          _project->recordPatch(patch_record);
+                      }
                   }
                   catch (...)
                   {

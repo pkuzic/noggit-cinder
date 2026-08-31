@@ -59,6 +59,22 @@ namespace Noggit::Project
             }
           }
 
+          if (project_configuration.contains("Patches") && project_configuration["Patches"].isArray())
+          {
+            auto project_patches = project_configuration["Patches"].toArray();
+
+            for (auto const& json_patch: project_patches)
+            {
+              auto patch = NoggitProjectPatchRecord();
+              patch.Name = json_patch.toObject().value("Name").toString().toStdString();
+              patch.Md5 = json_patch.toObject().value("Md5").toString().toStdString();
+              patch.Size = static_cast<long long>(json_patch.toObject().value("Size").toDouble());
+              patch.BuiltAt = json_patch.toObject().value("BuiltAt").toString().toStdString();
+
+              project.Patches.push_back(patch);
+            }
+          }
+
           if (project_configuration.contains("PinnedMaps") && project_configuration["PinnedMaps"].isArray())
           {
             auto project_pinned_maps = project_configuration["PinnedMaps"].toArray();
