@@ -4,7 +4,7 @@ Noggit Cinder is a fork of Noggit Red (a WotLK 3.3.5a editor), taught to **open 
 (v256/257) M2 models, and read/edit/save 1.12 ADT terrain**. All vanilla behaviour is gated on
 a new `ProjectVersion::VANILLA` so WotLK/SL projects are unchanged.
 
-Verified empirically against a real 1.12 client (`G:\twmoa_1181`, Turtle WoW) using its own
+Verified empirically against a real 1.12 client (a Turtle WoW install) using its own
 StormLib + M2/DBC parsers: the M2 geometry chain (`sum(vcount)==nVertices`,
 `sum(icount)==nTriangles` on a doodad, a character and a tree) and the DBC column layouts
 (Map name field, AreaTable name field, 8-locale string width).
@@ -57,7 +57,7 @@ is a static lib compiled into `noggit.exe`, so its two edited files rebuild with
 ## How to use
 
 1. New Project → pick **Vanilla** in the version dropdown, point the client path at the 1.12
-   client (e.g. `G:\twmoa_1181`), pick a project folder.
+   client (your Turtle/1.12 client folder), pick a project folder.
 2. Open a map from the list, edit terrain/objects, save.
 
 ## What changed (by area)

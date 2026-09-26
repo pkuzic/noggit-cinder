@@ -3,8 +3,47 @@ A World of Warcraft map editor for **3.3.5a and 1.12 (Vanilla / Turtle)** client
 Fork of [Noggit Red](https://gitlab.com/prophecy-rp/noggit-red/) with full vanilla
 client support and a stability overhaul — see `VANILLA-1.12-SUPPORT.md` for details.
 
+# Features #
+Noggit Cinder is a WotLK (3.3.5a) map editor adapted to also open and edit
+**1.12 (Vanilla / Turtle WoW)** maps and read vanilla (v256/257) M2 models. On top of the
+upstream Noggit Red feature set:
+
+**Vanilla 1.12 / Turtle support**
+- Opens 1.12 clients and projects; reads v256/257 M2 models correctly (fixes the garbage-tree
+  render bug); renders vanilla MCLQ water and saves it back without corruption.
+- Stability overhaul: fixes the Stormwind-approach crash family and hardens the MPQ / DBC / BLP /
+  water parsers against malformed vanilla data. Details in `VANILLA-1.12-SUPPORT.md`.
+- Vanilla `Map.dbc` support in the Map Creation Wizard; classic MPQ (format v1) patch export.
+
+**Ported from [Noggit Azure](https://github.com/BIGNUTAIRULESTHEWORLD/noggit-Azure)** (a sibling GPL3 Noggit Red fork)
+- **Brushes & Stamps** — the BrushStack + Stamp (MapStampAsset) system, including the Blizzard
+  randomizer and brush shapes.
+- **Missing-object placeholder** — a visible error-cube for models/WMOs that fail to load
+  (selectable, with real bounds), instead of an invisible gap.
+- **Detail doodads** — a preview of the client's ground-effect clutter (opt-in; off by default).
+
+**Cinder additions**
+- **1.12 compatibility linter** (Assist → *Check loaded tiles for 1.12 issues*) — flags data the
+  vanilla client can't render (missing models, WotLK high-res holes, unknown area IDs, unsupported
+  liquid types) and flies you to the offending tile on double-click.
+- **Reworked patch export** — auto-names to the highest free patch slot, remembers each patch it
+  built (hash + size) and refuses to clobber one changed outside Noggit; fixes the slash-hashing
+  bug that made exported patches silently fail to load in the client.
+- **WMO scaling removed** — per-instance WMO scale is a Legion+ field, so the editor no longer
+  shows a scale the 1.12 / 3.3.5 client would ignore.
+- **Built-in auto-updater** (see Releases).
+
 # Releases #
-Prebuilt executable are availables in the discord: https://discord.gg/NqvM3xE5uS
+Prebuilt Windows binaries are attached to each
+[GitHub Release](https://github.com/pkuzic/noggit-cinder/releases) — download and unzip the
+latest one to get started. You only need to do this **once**.
+
+**All future releases download automatically.** Noggit Cinder has a built-in updater: on launch
+it checks the update server and downloads any newer files in the background — so every new
+release lands in your install without a manual download. (You can still grab a full zip from
+Releases for a fresh install or another machine.)
+
+Prebuilt builds are also posted in the community Discord: https://discord.gg/NqvM3xE5uS
 
 # LICENSE #
 This software is open source software licensed under GPL3, as found in
