@@ -1,4 +1,5 @@
 #include "AdtPorterDialog.hpp"
+#include "AdtTileTransform.hpp"
 
 #include <noggit/MapHeaders.h>
 #include <noggit/database/ClientDatabase.h>
@@ -24,7 +25,10 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QApplication>
+#include <QButtonGroup>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSaveFile>
 #include <QSettings>
 #include <QSlider>
@@ -34,6 +38,7 @@
 #include <cstring>
 #include <functional>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 namespace Noggit::Ui::Windows
@@ -353,68 +358,23 @@ namespace
     return true;
   }
 
+  // Raw in-place tile shift, shared with the ADT Tile Mover (AdtTileTransform.cpp).
+  // `uid_map` is shared across one port so border-twin objects keep a single new id.
   bool transformAdt(std::vector<char>& bytes, int source_x, int source_z,
-                    int destination_x, int destination_z, std::uint32_t& next_uid,
-                    int& model_count, int& wmo_count, QString& error)
+                    int destination_x, int destination_z,
+                    std::unordered_map<std::uint32_t, std::uint32_t>& uid_map,
+                    std::uint32_t& next_uid, int& model_count, int& wmo_count, QString& error)
   {
-    // TODO(azure-port): rotation needs ChunkClipboard (Chunk Mover) port.
-    // Azure performs quarter-turn ADT rotation through ChunkClipboard, which is
-    // a stub in Cinder, so this port only applies the translation (tile shift).
-    float const dx = static_cast<float>(destination_x - source_x) * TILESIZE;
-    float const dz = static_cast<float>(destination_z - source_z) * TILESIZE;
-    int mcnk_count = 0;
-    bool valid_version = false;
-    bool okay = visitTopLevelChunks(bytes,
-      [&](ChunkHeader& chunk, char* data, std::uint32_t size)
-      {
-        if (chunk.magic == 'MVER' && size == 4)
-          valid_version = *reinterpret_cast<std::uint32_t*>(data) == 18;
-        else if (chunk.magic == 'MCNK' && size >= sizeof(MapChunkHeader))
-        {
-          auto* header = reinterpret_cast<MapChunkHeader*>(data);
-          header->xpos -= dx;
-          header->zpos -= dz;
-          ++mcnk_count;
-        }
-        else if (chunk.magic == 'MDDF' && size % sizeof(ENTRY_MDDF) == 0)
-        {
-          auto* entries = reinterpret_cast<ENTRY_MDDF*>(data);
-          model_count = static_cast<int>(size / sizeof(ENTRY_MDDF));
-          for (int i = 0; i < model_count; ++i)
-          {
-            entries[i].pos[0] += dx;
-            entries[i].pos[2] += dz;
-            entries[i].uniqueID = ++next_uid;
-          }
-        }
-        else if (chunk.magic == 'MODF' && size % sizeof(ENTRY_MODF) == 0)
-        {
-          auto* entries = reinterpret_cast<ENTRY_MODF*>(data);
-          wmo_count = static_cast<int>(size / sizeof(ENTRY_MODF));
-          for (int i = 0; i < wmo_count; ++i)
-          {
-            entries[i].pos[0] += dx;
-            entries[i].pos[2] += dz;
-            entries[i].extents[0].x += dx;
-            entries[i].extents[0].z += dz;
-            entries[i].extents[1].x += dx;
-            entries[i].extents[1].z += dz;
-            entries[i].uniqueID = ++next_uid;
-          }
-        }
-      }, error);
-    if (!okay)
-      return false;
-    if (!valid_version)
+    Noggit::AdtTileTransform::Stats stats;
+    std::string message;
+    if (!Noggit::AdtTileTransform::shiftTile(bytes, source_x, source_z, destination_x,
+                                             destination_z, uid_map, next_uid, stats, message))
     {
-      error = "Only WotLK ADT version 18 is supported.";
+      error = QString::fromStdString(message);
       return false;
     }
-    if (mcnk_count != 256)
-    {
-      error = QString("Source ADT contains %1 MCNK chunks instead of 256.").arg(mcnk_count);
-      return false;
-    }
+    model_count = stats.models;
+    wmo_count = stats.wmos;
     return true;
   }
 
@@ -489,14 +449,21 @@ namespace
 
 using namespace Noggit::Ui::Windows;
 
-AdtPorterDialog::AdtPorterDialog(std::shared_ptr<Project::NoggitProject> project, QWidget* parent)
-  : QDialog(parent), _project(std::move(project))
+AdtPorterDialog::AdtPorterDialog(std::shared_ptr<Project::NoggitProject> project, QWidget* parent,
+                                 Mode mode)
+  : QDialog(parent), _project(std::move(project)), _mode(mode)
 {
-  setWindowTitle("ADT Porting Tool");
+  bool const tile_mover = _mode == Mode::TileMover;
+  setWindowTitle(tile_mover ? "ADT Tile Mover" : "ADT Porting Tool");
   setMinimumWidth(940);
   auto* root = new QVBoxLayout(this);
-  auto* help = new QLabel(
-      "Paint one or more WotLK ADTs to move between maps—or relocate them on one map—without opening a world. The destination is "
+  auto* help = new QLabel(tile_mover
+    ? "Move or copy one or more whole ADT tiles to other tile coordinates on the same map. Everything "
+      "in the tile is carried over unchanged (terrain, textures and alphamaps, holes, vertex shading, "
+      "area ids, water); doodad and WMO placements are shifted with the tile and given fresh unique "
+      "ids, and the WDT tile flags are updated. Files are written directly to the project after a "
+      "backup is created."
+    : "Paint one or more WotLK ADTs to move between maps—or relocate them on one map—without opening a world. The destination is "
       "written directly to the project after a backup is created.", this);
   help->setWordWrap(true);
   root->addWidget(help);
@@ -518,11 +485,36 @@ AdtPorterDialog::AdtPorterDialog(std::shared_ptr<Project::NoggitProject> project
     layout->addWidget(instructions);
     maps->addWidget(box);
   };
-  create_side("1. Select source ADTs", true, _source_map, _source_grid);
-  create_side("2. Choose destination", false, _destination_map, _destination_grid);
+  create_side(tile_mover ? "1. Select tiles (map)" : "1. Select source ADTs", true, _source_map, _source_grid);
+  create_side(tile_mover ? "2. Choose new position" : "2. Choose destination", false, _destination_map, _destination_grid);
   _same_map = new QCheckBox("Use the same map as destination", this);
   _same_map->setToolTip("Move the painted ADTs within the source map and clear their original tile flags.");
   root->addWidget(_same_map);
+  if (tile_mover)
+  {
+    // The Tile Mover always works on ONE map: the destination grid mirrors the source map.
+    _same_map->setChecked(true);
+    _same_map->hide();
+    _destination_map->hide();
+    auto* mode_row = new QHBoxLayout();
+    _move_mode = new QRadioButton("Move tiles", this);
+    _move_mode->setToolTip("Write the tiles at the new position and remove them from the old one "
+                           "(WDT flag cleared, project ADT file deleted after backup).");
+    _copy_mode = new QRadioButton("Copy tiles", this);
+    _copy_mode->setToolTip("Write a copy of the tiles at the new position and keep the originals.");
+    _move_mode->setChecked(true);
+    auto* mode_group = new QButtonGroup(this);
+    mode_group->addButton(_move_mode);
+    mode_group->addButton(_copy_mode);
+    _overwrite = new QCheckBox("Overwrite existing destination tiles", this);
+    _overwrite->setToolTip("Without this, the operation is refused if any destination tile already exists.");
+    mode_row->addWidget(_move_mode);
+    mode_row->addWidget(_copy_mode);
+    mode_row->addSpacing(24);
+    mode_row->addWidget(_overwrite);
+    mode_row->addStretch();
+    root->addLayout(mode_row);
+  }
   _hide_adt_squares = new QCheckBox("Hide ADT squares", this);
   _hide_adt_squares->setToolTip(
       "Hide the ADT grid, selection, and destination footprint overlays while keeping the landmass preview visible.");
@@ -561,10 +553,22 @@ AdtPorterDialog::AdtPorterDialog(std::shared_ptr<Project::NoggitProject> project
   _status->setWordWrap(true);
   root->addWidget(_status);
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
-  auto* port = buttons->addButton("Port ADT", QDialogButtonBox::AcceptRole);
+  _action_button = buttons->addButton(tile_mover ? "Move tiles" : "Port ADT",
+                                     QDialogButtonBox::AcceptRole);
   root->addWidget(buttons);
   connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-  connect(port, &QPushButton::clicked, this, &AdtPorterDialog::portAdt);
+  if (tile_mover)
+  {
+    connect(_action_button, &QPushButton::clicked, this, &AdtPorterDialog::moveTiles);
+    connect(_move_mode, &QRadioButton::toggled, this, [this](bool)
+    {
+      _action_button->setText(moving() ? "Move tiles" : "Copy tiles");
+      updateSummary();
+    });
+    connect(_overwrite, &QCheckBox::toggled, this, [this](bool) { updateSummary(); });
+  }
+  else
+    connect(_action_button, &QPushButton::clicked, this, &AdtPorterDialog::portAdt);
   connect(_source_map, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index)
   {
     reloadSourceGrid();
@@ -606,6 +610,11 @@ AdtPorterDialog::AdtPorterDialog(std::shared_ptr<Project::NoggitProject> project
 
 AdtPorterDialog::~AdtPorterDialog() = default;
 
+bool AdtPorterDialog::moving() const
+{
+  return _mode == Mode::TileMover && _move_mode && _move_mode->isChecked();
+}
+
 void AdtPorterDialog::updateSummary()
 {
   QVariantMap const source = _source_map->currentData().toMap();
@@ -643,7 +652,8 @@ void AdtPorterDialog::updateSummary()
     else
     {
       footprint.insert(target);
-      if (_destination_grid->occupied(target))
+      // In Move mode a destination that is one of the tiles being vacated is not a collision.
+      if (_destination_grid->occupied(target) && !(moving() && selection.contains(target)))
         ++collisions;
     }
   }
@@ -651,6 +661,25 @@ void AdtPorterDialog::updateSummary()
                                   QPointF(source_pivot.x() + .5, source_pivot.y() + .5),
                                   anchor, selection,
                                   _preview_opacity->value() / 100.f);
+  if (_mode == Mode::TileMover)
+  {
+    QPoint const offset = anchor - source_pivot;
+    _summary->setText(QString("%1 %2 tile%3 on %4 by (%5, %6), centered at %7_%8. %9")
+        .arg(moving() ? "Move" : "Copy")
+        .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
+        .arg(source.value("directory").toString())
+        .arg(offset.x()).arg(offset.y())
+        .arg(anchor.x()).arg(anchor.y())
+        .arg(outside ? "The destination footprint extends outside the map."
+             : offset == QPoint(0, 0) ? "The destination is the same as the source."
+             : collisions ? QString("%1 destination tile%2 already exist%3 — %4.")
+                              .arg(collisions).arg(collisions == 1 ? "" : "s")
+                              .arg(collisions == 1 ? "s" : "")
+                              .arg(_overwrite->isChecked() ? "they will be OVERWRITTEN"
+                                                           : "tick \"Overwrite\" to replace them")
+             : "The destination footprint is clear."));
+    return;
+  }
   _summary->setText(QString("%1 selected source ADT%2 from %3 → %4, centered at %5_%6. %7")
       .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
       .arg(source.value("directory").toString(), destination.value("directory").toString())
@@ -804,6 +833,7 @@ void AdtPorterDialog::portAdt()
 
   std::vector<char> const original_wdt = wdt;
   std::uint32_t next_uid = uid_storage::getMaxUID(destination_id);
+  std::unordered_map<std::uint32_t, std::uint32_t> uid_map;
   struct Transfer
   {
     QPoint source;
@@ -829,7 +859,7 @@ void AdtPorterDialog::portAdt()
     int tile_wmos = 0;
     if (!readClientFile(_project, source_path, transfer.transformed, error)
         || !transformAdt(transfer.transformed, source_tile.x(), source_tile.y(),
-                        destination_tile.x(), destination_tile.y(), next_uid,
+                        destination_tile.x(), destination_tile.y(), uid_map, next_uid,
                         tile_models, tile_wmos, error)
         || !enableWdtTile(wdt, destination_tile.x(), destination_tile.y(), error))
     {
@@ -912,5 +942,294 @@ void AdtPorterDialog::portAdt()
   _status->setText(QString("Port complete: %1 ADTs (%2 chunks), %3 M2 records, %4 WMO records. Backup: %5")
                        .arg(transfers.size()).arg(transfers.size() * 256)
                        .arg(models).arg(wmos).arg(backup_dir));
+  reloadDestinationGrid();
+}
+
+// ADT Tile Mover: move or copy whole tiles within ONE map. The tiles are relocated as raw
+// bytes (AdtTileTransform), so the 1.12 data Cinder writes (MCLQ water, MCCV, vanilla area
+// ids, WMO scale 1.0) is carried byte-for-byte; nothing goes through MapTile::save here.
+// Runs only from the map-selection screen (no world open), so it cannot fight the editor's
+// in-memory tiles; it is therefore not in the undo stack -- a timestamped backup of every file
+// it changes or removes is written first instead.
+void AdtPorterDialog::moveTiles()
+{
+  _status->setStyleSheet({});
+  QVariantMap const map = _source_map->currentData().toMap();
+  QString const directory = map.value("directory").toString();
+  int const map_id = map.value("id").toInt();
+  auto const selection = _source_grid->selection();
+  QPoint const anchor = _destination_grid->anchor();
+  bool const move = moving();
+  if (directory.isEmpty() || selection.empty() || anchor.x() < 0)
+  {
+    _status->setText("Select one or more tiles on the left, then click their new position on the right.");
+    return;
+  }
+
+  int min_x = 63, max_x = 0, min_z = 63, max_z = 0;
+  for (QPoint const& point : selection)
+  {
+    min_x = std::min(min_x, point.x());
+    max_x = std::max(max_x, point.x());
+    min_z = std::min(min_z, point.y());
+    max_z = std::max(max_z, point.y());
+  }
+  QPoint const source_pivot(min_x + (max_x - min_x + 1) / 2, min_z + (max_z - min_z + 1) / 2);
+  QPoint const offset = anchor - source_pivot;
+  if (offset == QPoint(0, 0))
+  {
+    _status->setText("The new position is the same as the current one - nothing to do.");
+    return;
+  }
+  for (QPoint const& point : selection)
+  {
+    QPoint const target = point + offset;
+    if (target.x() < 0 || target.x() >= 64 || target.y() < 0 || target.y() >= 64)
+    {
+      _status->setText("The destination footprint extends outside the 64x64 map grid.");
+      return;
+    }
+  }
+
+  QSettings settings;
+  if (settings.value("project/mysql/enabled", false).toBool())
+  {
+    _status->setText("The ADT Tile Mover cannot safely update MySQL-backed UIDs. Disable MySQL UID "
+                     "storage in the settings first.");
+    return;
+  }
+
+  QString error;
+  QString const wdt_logical = logicalWdtPath(directory);
+  std::vector<char> wdt;
+  std::array<bool, 4096> occupancy{};
+  if (!readClientFile(_project, wdt_logical, wdt, error) || !wdtOccupancy(wdt, occupancy, error))
+  {
+    _status->setText(error);
+    return;
+  }
+  std::vector<char> const original_wdt = wdt;
+
+  QStringList collisions;
+  for (QPoint const& point : selection)
+  {
+    QPoint const target = point + offset;
+    if (occupancy[target.y() * 64 + target.x()] && !(move && selection.contains(target)))
+      collisions << QString("%1_%2").arg(target.x()).arg(target.y());
+  }
+  if (!collisions.empty() && !_overwrite->isChecked())
+  {
+    QString const message = QString("%1 destination tile%2 already exist%3 on %4: %5.\n\n"
+                                    "Tick \"Overwrite existing destination tiles\" to replace %6, "
+                                    "or choose another position.")
+        .arg(collisions.size()).arg(collisions.size() == 1 ? "" : "s")
+        .arg(collisions.size() == 1 ? "s" : "").arg(directory, collisions.join(", "))
+        .arg(collisions.size() == 1 ? "it" : "them");
+    QMessageBox::warning(this, "ADT Tile Mover", message);
+    _status->setText(message);
+    return;
+  }
+
+  QString const backup_root = QDir(QString::fromStdString(_project->ProjectPath))
+      .filePath("noggit-backups/adt-tile-mover");
+  if (QMessageBox::warning(this, move ? "Move tiles" : "Copy tiles",
+      QString("%1 %2 tile%3 on %4 by (%5, %6) tiles?\n\n"
+              "%7"
+              "This writes the ADT and WDT files DIRECTLY TO THE PROJECT ON DISK and cannot be undone "
+              "with Undo. A backup of every file it changes or removes is written first to:\n%8\\<timestamp>\n\n"
+              "The map's WDL (distant terrain) and minimap images are not regenerated.")
+        .arg(move ? "Move" : "Copy")
+        .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
+        .arg(directory).arg(offset.x()).arg(offset.y())
+        .arg(collisions.empty() ? QString()
+             : QString("%1 existing tile%2 will be OVERWRITTEN: %3.\n\n")
+                 .arg(collisions.size()).arg(collisions.size() == 1 ? "" : "s")
+                 .arg(collisions.join(", ")))
+        .arg(QDir::toNativeSeparators(backup_root)),
+      QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+    return;
+
+  struct CursorGuard
+  {
+    CursorGuard() { QApplication::setOverrideCursor(Qt::WaitCursor); }
+    ~CursorGuard() { QApplication::restoreOverrideCursor(); }
+  } cursor_guard;
+
+  // Fresh, non-colliding UIDs: start above BOTH the stored max UID of the map and the highest
+  // UID actually present in any of its existing tiles (the store can be stale or missing).
+  std::uint32_t const stored_max = uid_storage::hasMaxUIDStored(map_id)
+                                     ? uid_storage::getMaxUID(map_id) : 0;
+  std::uint32_t next_uid = stored_max;
+  for (int index = 0; index < 4096; ++index)
+  {
+    if (!occupancy[index])
+      continue;
+    std::vector<char> tile;
+    QString ignored;
+    std::string scan_error;
+    if (readClientFile(_project, logicalAdtPath(directory, index % 64, index / 64), tile, ignored))
+      Noggit::AdtTileTransform::collectMaxUid(tile, next_uid, scan_error);
+  }
+
+  struct Transfer
+  {
+    QPoint destination;
+    QString logical_path;
+    std::vector<char> transformed;
+    std::vector<char> original;
+    bool had_original = false;
+  };
+  std::vector<Transfer> transfers;
+  std::unordered_map<std::uint32_t, std::uint32_t> uid_map;
+  Noggit::AdtTileTransform::Stats stats;
+  std::set<int> destination_indices;
+  for (QPoint const& source_tile : selection)
+  {
+    QPoint const destination_tile = source_tile + offset;
+    destination_indices.insert(destination_tile.y() * 64 + destination_tile.x());
+    Transfer transfer{destination_tile,
+                      logicalAdtPath(directory, destination_tile.x(), destination_tile.y())};
+    std::string shift_error;
+    if (!readClientFile(_project, logicalAdtPath(directory, source_tile.x(), source_tile.y()),
+                        transfer.transformed, error))
+    {
+      _status->setText(error);
+      return;
+    }
+    if (!Noggit::AdtTileTransform::shiftTile(transfer.transformed, source_tile.x(), source_tile.y(),
+                                             destination_tile.x(), destination_tile.y(), uid_map,
+                                             next_uid, stats, shift_error))
+    {
+      _status->setText(QString("%1_%2_%3.adt: %4").arg(directory).arg(source_tile.x())
+                         .arg(source_tile.y()).arg(QString::fromStdString(shift_error)));
+      return;
+    }
+    if (!enableWdtTile(wdt, destination_tile.x(), destination_tile.y(), error))
+    {
+      _status->setText(error);
+      return;
+    }
+    QString ignored;
+    // Back up whatever currently sits at the destination path (flagged tile, or a stale
+    // unflagged project file) so it can be restored on rollback / from the backup.
+    transfer.had_original = readClientFile(_project, transfer.logical_path, transfer.original, ignored);
+    transfers.emplace_back(std::move(transfer));
+  }
+
+  auto disk_path = [this](QString const& logical)
+  {
+    return QString::fromStdString(_project->ClientData->getDiskPath(
+        BlizzardArchive::Listfile::FileKey(logical.toStdString())));
+  };
+
+  // Move: vacate every source tile that is not itself a destination of this block.
+  struct Vacated
+  {
+    QPoint tile;
+    QString disk_path;
+    std::vector<char> original;
+  };
+  std::vector<Vacated> vacated;
+  if (move)
+  {
+    for (QPoint const& source_tile : selection)
+    {
+      if (destination_indices.contains(source_tile.y() * 64 + source_tile.x()))
+        continue;
+      if (!disableWdtTile(wdt, source_tile.x(), source_tile.y(), error))
+      {
+        _status->setText(error);
+        return;
+      }
+      QString const logical = logicalAdtPath(directory, source_tile.x(), source_tile.y());
+      QString const disk = disk_path(logical);
+      Vacated entry{source_tile, QFileInfo::exists(disk) ? disk : QString()};
+      QString ignored;
+      readClientFile(_project, logical, entry.original, ignored);
+      vacated.emplace_back(std::move(entry));
+    }
+  }
+
+  // Backups first.
+  QString const stamp = QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss");
+  QString const backup_dir = QDir(backup_root).filePath(stamp);
+  if (!QDir().mkpath(backup_dir))
+  {
+    _status->setText("Unable to create the backup directory " + backup_dir);
+    return;
+  }
+  if (!writeFile(QDir(backup_dir).filePath(QString("%1-original.wdt").arg(directory)), original_wdt, error))
+  {
+    _status->setText(error);
+    return;
+  }
+  for (Transfer const& transfer : transfers)
+    if (transfer.had_original
+        && !writeFile(QDir(backup_dir).filePath(QString("destination-%1_%2_%3-original.adt")
+                        .arg(directory).arg(transfer.destination.x()).arg(transfer.destination.y())),
+                      transfer.original, error))
+    {
+      _status->setText(error);
+      return;
+    }
+  for (Vacated const& entry : vacated)
+    if (!entry.original.empty()
+        && !writeFile(QDir(backup_dir).filePath(QString("source-%1_%2_%3-original.adt")
+                        .arg(directory).arg(entry.tile.x()).arg(entry.tile.y())),
+                      entry.original, error))
+    {
+      _status->setText(error);
+      return;
+    }
+
+  // Write destinations, then the WDT; roll the ADTs back if anything fails.
+  std::size_t written = 0;
+  for (; written < transfers.size(); ++written)
+  {
+    QString const path = disk_path(transfers[written].logical_path);
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    if (!writeFile(path, transfers[written].transformed, error))
+      break;
+  }
+  QString const wdt_disk = disk_path(wdt_logical);
+  QDir().mkpath(QFileInfo(wdt_disk).absolutePath());
+  if (written != transfers.size() || !writeFile(wdt_disk, wdt, error))
+  {
+    QString restore_error;
+    for (std::size_t i = 0; i < written; ++i)
+    {
+      QString const path = disk_path(transfers[i].logical_path);
+      if (transfers[i].had_original)
+        writeFile(path, transfers[i].original, restore_error);
+      else
+        QFile::remove(path);
+    }
+    _status->setText(error + (restore_error.isEmpty() ? " The ADT writes were rolled back."
+                                                      : " Automatic ADT rollback failed: " + restore_error)
+                     + QString(" Backup: %1").arg(backup_dir));
+    return;
+  }
+
+  QStringList undeleted;
+  for (Vacated const& entry : vacated)
+    if (!entry.disk_path.isEmpty() && !QFile::remove(entry.disk_path))
+      undeleted << QDir::toNativeSeparators(entry.disk_path);
+
+  if (next_uid > stored_max)
+    uid_storage::saveMaxUID(map_id, next_uid);
+
+  _status->setStyleSheet(undeleted.empty() ? "color: #5cb85c;" : "color: #f0ad4e;");
+  _status->setText(QString("%1 complete: %2 tile%3 by (%4, %5); %6 M2, %7 WMO, %8 sound emitter "
+                           "records shifted; %9 new unique ids (max UID now %10).%11 Backup: %12")
+      .arg(move ? "Move" : "Copy")
+      .arg(transfers.size()).arg(transfers.size() == 1 ? "" : "s")
+      .arg(offset.x()).arg(offset.y())
+      .arg(stats.models).arg(stats.wmos).arg(stats.sound_emitters)
+      .arg(uid_map.size()).arg(next_uid)
+      .arg(undeleted.empty() ? QString()
+           : QString(" The old tiles were removed from the WDT, but these files could not be deleted: %1.")
+               .arg(undeleted.join(", ")))
+      .arg(QDir::toNativeSeparators(backup_dir)));
+  reloadSourceGrid();
   reloadDestinationGrid();
 }

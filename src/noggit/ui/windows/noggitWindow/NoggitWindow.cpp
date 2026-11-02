@@ -154,6 +154,25 @@ namespace Noggit::Ui::Windows
       dialog->activateWindow();
     });
 
+    // ADT Tile Mover: move / copy whole tiles within one map (shares the porter's grid UI
+    // and raw tile-shift machinery; see AdtPorterDialog::Mode::TileMover).
+    auto adt_tile_mover_action(file_menu->addAction("ADT Tile Mover..."));
+    QObject::connect(adt_tile_mover_action, &QAction::triggered, this, [this]
+    {
+      if (map_loaded)
+      {
+        QMessageBox::information(this, "ADT Tile Mover",
+          "Return to the map-selection screen before moving tiles. This prevents the tool from "
+          "changing files that are currently open in the world editor.");
+        return;
+      }
+      auto* dialog = new AdtPorterDialog(_project, this, AdtPorterDialog::Mode::TileMover);
+      dialog->setAttribute(Qt::WA_DeleteOnClose);
+      dialog->show();
+      dialog->raise();
+      dialog->activateWindow();
+    });
+
     auto about_action(file_menu->addAction("About"));
     QObject::connect(about_action, &QAction::triggered, [&]
                      {
