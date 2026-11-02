@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDialog>
+#include <QPoint>
 #include <memory>
 
 class QComboBox;
@@ -9,6 +10,7 @@ class QLabel;
 class QPushButton;
 class QRadioButton;
 class QSlider;
+class QSpinBox;
 class World;
 
 namespace Noggit::Project { class NoggitProject; }
@@ -35,6 +37,11 @@ namespace Noggit::Ui::Windows
     void moveTiles();
     bool moving() const;
     void updateSummary();
+    void updateNudgeButtons();
+    void nudge(QPoint const& direction);
+    QPoint selectionPivot() const;
+    QPoint selectionOffset() const;
+    bool offsetFits(QPoint const& offset) const;
     void reloadSourceGrid();
     void reloadDestinationGrid();
 
@@ -53,6 +60,11 @@ namespace Noggit::Ui::Windows
     QRadioButton* _copy_mode = nullptr;
     QCheckBox* _overwrite = nullptr;
     QPushButton* _action_button = nullptr;
+    QSpinBox* _nudge_step = nullptr;
+    QPushButton* _nudge_north = nullptr;
+    QPushButton* _nudge_west = nullptr;
+    QPushButton* _nudge_east = nullptr;
+    QPushButton* _nudge_south = nullptr;
     std::unique_ptr<World> _source_preview_world;
     std::unique_ptr<World> _destination_preview_world;
   };

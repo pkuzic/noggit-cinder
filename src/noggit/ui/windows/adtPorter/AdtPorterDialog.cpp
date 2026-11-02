@@ -27,11 +27,13 @@
 #include <QPainter>
 #include <QApplication>
 #include <QButtonGroup>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSaveFile>
 #include <QSettings>
 #include <QSlider>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -86,6 +88,35 @@ namespace Noggit::Ui::Windows
     }
 
     QPoint anchor() const { return _anchor; }
+
+    void selectAllOccupied()
+    {
+      _selection.clear();
+      for (int z = 0; z < 64; ++z)
+        for (int x = 0; x < 64; ++x)
+          if (_occupancy[z * 64 + x])
+            _selection.insert(QPoint(x, z));
+      update();
+    }
+
+    void clearSelection()
+    {
+      _selection.clear();
+      update();
+    }
+
+    bool wholeMapSelected() const
+    {
+      return !_selection.empty()
+          && _selection.size() == static_cast<std::size_t>(
+               std::count(_occupancy.begin(), _occupancy.end(), true));
+    }
+
+    void setAnchor(QPoint const& point)
+    {
+      _anchor = point;
+      update();
+    }
     QImage const& mapImage() const { return _map_image; }
     bool occupied(QPoint const& point) const
     {
@@ -430,6 +461,35 @@ namespace
     return okay && found;
   }
 
+  // A map-wide WMO placed in the WDT itself: its position is not stored in any ADT tile.
+  bool wdtHasGlobalWmo(std::vector<char> bytes)
+  {
+    bool found = false;
+    QString ignored;
+    visitTopLevelChunks(bytes,
+      [&](ChunkHeader& chunk, char*, std::uint32_t size)
+      {
+        if (chunk.magic == 'MODF' && size > 0)
+          found = true;
+      }, ignored);
+    return found;
+  }
+
+  // Tile columns grow eastward and rows southward, matching the grids (north is up).
+  QString describeOffset(QPoint const& offset)
+  {
+    if (offset == QPoint(0, 0))
+      return "not moved";
+    QStringList parts;
+    if (offset.y() != 0)
+      parts << QString("%1 tile%2 %3").arg(std::abs(offset.y())).arg(std::abs(offset.y()) == 1 ? "" : "s")
+                 .arg(offset.y() < 0 ? "north" : "south");
+    if (offset.x() != 0)
+      parts << QString("%1 tile%2 %3").arg(std::abs(offset.x())).arg(std::abs(offset.x()) == 1 ? "" : "s")
+                 .arg(offset.x() < 0 ? "west" : "east");
+    return parts.join(", ");
+  }
+
   QString logicalAdtPath(QString const& directory, int x, int z)
   {
     return QString("World\\Maps\\%1\\%1_%2_%3.adt").arg(directory).arg(x).arg(z);
@@ -514,6 +574,46 @@ AdtPorterDialog::AdtPorterDialog(std::shared_ptr<Project::NoggitProject> project
     mode_row->addWidget(_overwrite);
     mode_row->addStretch();
     root->addLayout(mode_row);
+
+    // Whole map: select every tile, then step the block with the arrows instead of the grid.
+    auto* map_row = new QHBoxLayout();
+    auto* select_all = new QPushButton("Select whole map", this);
+    select_all->setToolTip("Select every tile of this map, ready to be moved as one block.");
+    auto* clear_selection = new QPushButton("Clear selection", this);
+    _nudge_step = new QSpinBox(this);
+    _nudge_step->setRange(1, 63);
+    _nudge_step->setSuffix(" tile(s)");
+    _nudge_step->setToolTip("How far one arrow click moves the selection.");
+    map_row->addWidget(select_all);
+    map_row->addWidget(clear_selection);
+    map_row->addSpacing(24);
+    map_row->addWidget(new QLabel("Move by", this));
+    map_row->addWidget(_nudge_step);
+    auto add_nudge = [this, map_row](QPushButton*& button, QString const& text, QPoint const& direction)
+    {
+      button = new QPushButton(text, this);
+      map_row->addWidget(button);
+      connect(button, &QPushButton::clicked, this, [this, direction] { nudge(direction); });
+    };
+    add_nudge(_nudge_north, QString::fromUtf8("\xE2\x86\x91 North"), QPoint(0, -1));
+    add_nudge(_nudge_west, QString::fromUtf8("\xE2\x86\x90 West"), QPoint(-1, 0));
+    add_nudge(_nudge_east, QString::fromUtf8("East \xE2\x86\x92"), QPoint(1, 0));
+    add_nudge(_nudge_south, QString::fromUtf8("\xE2\x86\x93 South"), QPoint(0, 1));
+    map_row->addStretch();
+    root->addLayout(map_row);
+    connect(select_all, &QPushButton::clicked, this, [this]
+    {
+      _source_grid->selectAllOccupied();
+      if (!_source_grid->selection().empty())
+        _destination_grid->setAnchor(selectionPivot());
+      updateSummary();
+    });
+    connect(clear_selection, &QPushButton::clicked, this, [this]
+    {
+      _source_grid->clearSelection();
+      updateSummary();
+    });
+    connect(_nudge_step, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) { updateNudgeButtons(); });
   }
   _hide_adt_squares = new QCheckBox("Hide ADT squares", this);
   _hide_adt_squares->setToolTip(
@@ -615,8 +715,64 @@ bool AdtPorterDialog::moving() const
   return _mode == Mode::TileMover && _move_mode && _move_mode->isChecked();
 }
 
+QPoint AdtPorterDialog::selectionPivot() const
+{
+  int min_x = 63, max_x = 0, min_z = 63, max_z = 0;
+  for (QPoint const& point : _source_grid->selection())
+  {
+    min_x = std::min(min_x, point.x());
+    max_x = std::max(max_x, point.x());
+    min_z = std::min(min_z, point.y());
+    max_z = std::max(max_z, point.y());
+  }
+  return QPoint(min_x + (max_x - min_x + 1) / 2, min_z + (max_z - min_z + 1) / 2);
+}
+
+// The offset the current anchor stands for; a block with no anchor yet has not moved.
+QPoint AdtPorterDialog::selectionOffset() const
+{
+  QPoint const anchor = _destination_grid->anchor();
+  return anchor.x() < 0 ? QPoint(0, 0) : anchor - selectionPivot();
+}
+
+bool AdtPorterDialog::offsetFits(QPoint const& offset) const
+{
+  for (QPoint const& point : _source_grid->selection())
+  {
+    QPoint const target = point + offset;
+    if (target.x() < 0 || target.x() >= 64 || target.y() < 0 || target.y() >= 64)
+      return false;
+  }
+  return true;
+}
+
+void AdtPorterDialog::nudge(QPoint const& direction)
+{
+  if (_source_grid->selection().empty())
+    return;
+  QPoint const offset = selectionOffset() + direction * _nudge_step->value();
+  if (!offsetFits(offset))
+    return;
+  _destination_grid->setAnchor(selectionPivot() + offset);
+  updateSummary();
+}
+
+void AdtPorterDialog::updateNudgeButtons()
+{
+  if (!_nudge_step)
+    return;
+  bool const any = !_source_grid->selection().empty();
+  QPoint const offset = any ? selectionOffset() : QPoint(0, 0);
+  int const step = _nudge_step->value();
+  _nudge_north->setEnabled(any && offsetFits(offset + QPoint(0, -step)));
+  _nudge_west->setEnabled(any && offsetFits(offset + QPoint(-step, 0)));
+  _nudge_east->setEnabled(any && offsetFits(offset + QPoint(step, 0)));
+  _nudge_south->setEnabled(any && offsetFits(offset + QPoint(0, step)));
+}
+
 void AdtPorterDialog::updateSummary()
 {
+  updateNudgeButtons();
   QVariantMap const source = _source_map->currentData().toMap();
   QVariantMap const destination = _destination_map->currentData().toMap();
   auto const& selection = _source_grid->selection();
@@ -664,11 +820,13 @@ void AdtPorterDialog::updateSummary()
   if (_mode == Mode::TileMover)
   {
     QPoint const offset = anchor - source_pivot;
-    _summary->setText(QString("%1 %2 tile%3 on %4 by (%5, %6), centered at %7_%8. %9")
+    _summary->setText(QString("%1 %2 on %3: %4, centered at %5_%6. %7")
         .arg(moving() ? "Move" : "Copy")
-        .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
+        .arg(_source_grid->wholeMapSelected()
+               ? QString("the WHOLE MAP (%1 tiles)").arg(selection.size())
+               : QString("%1 tile%2").arg(selection.size()).arg(selection.size() == 1 ? "" : "s"))
         .arg(source.value("directory").toString())
-        .arg(offset.x()).arg(offset.y())
+        .arg(describeOffset(offset))
         .arg(anchor.x()).arg(anchor.y())
         .arg(outside ? "The destination footprint extends outside the map."
              : offset == QPoint(0, 0) ? "The destination is the same as the source."
@@ -1032,20 +1190,30 @@ void AdtPorterDialog::moveTiles()
 
   QString const backup_root = QDir(QString::fromStdString(_project->ProjectPath))
       .filePath("noggit-backups/adt-tile-mover");
+  QString whole_map_note;
+  if (_source_grid->wholeMapSelected())
+  {
+    whole_map_note = "\n\nThis only moves the map's files. Everything positioned outside them stays at "
+                     "the old coordinates: server spawns, graveyards, area triggers and teleports, flight "
+                     "paths, Light.dbc, WorldMapArea.dbc. Server map data must also be regenerated.";
+    if (wdtHasGlobalWmo(original_wdt))
+      whole_map_note += "\n\nWARNING: this map's WDT places a map-wide WMO, which will NOT be moved.";
+  }
   if (QMessageBox::warning(this, move ? "Move tiles" : "Copy tiles",
-      QString("%1 %2 tile%3 on %4 by (%5, %6) tiles?\n\n"
-              "%7"
+      QString("%1 %2 tile%3 on %4: %5?\n\n"
+              "%6"
               "This writes the ADT and WDT files DIRECTLY TO THE PROJECT ON DISK and cannot be undone "
-              "with Undo. A backup of every file it changes or removes is written first to:\n%8\\<timestamp>\n\n"
-              "The map's WDL (distant terrain) and minimap images are not regenerated.")
+              "with Undo. A backup of every file it changes or removes is written first to:\n%7\\<timestamp>\n\n"
+              "The map's WDL (distant terrain) and minimap images are not regenerated.%8")
         .arg(move ? "Move" : "Copy")
         .arg(selection.size()).arg(selection.size() == 1 ? "" : "s")
-        .arg(directory).arg(offset.x()).arg(offset.y())
+        .arg(directory).arg(describeOffset(offset))
         .arg(collisions.empty() ? QString()
              : QString("%1 existing tile%2 will be OVERWRITTEN: %3.\n\n")
                  .arg(collisions.size()).arg(collisions.size() == 1 ? "" : "s")
                  .arg(collisions.join(", ")))
-        .arg(QDir::toNativeSeparators(backup_root)),
+        .arg(QDir::toNativeSeparators(backup_root))
+        .arg(whole_map_note),
       QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
     return;
 
@@ -1060,10 +1228,17 @@ void AdtPorterDialog::moveTiles()
   std::uint32_t const stored_max = uid_storage::hasMaxUIDStored(map_id)
                                      ? uid_storage::getMaxUID(map_id) : 0;
   std::uint32_t next_uid = stored_max;
+  int const tile_count = static_cast<int>(std::count(occupancy.begin(), occupancy.end(), true));
+  QProgressDialog progress(move ? "Moving tiles..." : "Copying tiles...", QString(), 0,
+                           tile_count + static_cast<int>(selection.size()), this);
+  progress.setWindowModality(Qt::WindowModal);
+  progress.setMinimumDuration(500);
+  int progress_value = 0;
   for (int index = 0; index < 4096; ++index)
   {
     if (!occupancy[index])
       continue;
+    progress.setValue(++progress_value);
     std::vector<char> tile;
     QString ignored;
     std::string scan_error;
@@ -1085,6 +1260,7 @@ void AdtPorterDialog::moveTiles()
   std::set<int> destination_indices;
   for (QPoint const& source_tile : selection)
   {
+    progress.setValue(++progress_value);
     QPoint const destination_tile = source_tile + offset;
     destination_indices.insert(destination_tile.y() * 64 + destination_tile.x());
     Transfer transfer{destination_tile,
