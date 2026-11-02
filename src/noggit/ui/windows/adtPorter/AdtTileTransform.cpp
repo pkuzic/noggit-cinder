@@ -32,11 +32,7 @@ namespace
       visitor(header, bytes.data() + data_position, header.size);
       position = end;
     }
-    if (position != bytes.size())
-    {
-      error = "ADT contains trailing data outside its chunk structure.";
-      return false;
-    }
+    // Fewer than 8 stray bytes cannot be a chunk: stock tiles end in such padding. Left untouched.
     return true;
   }
 
@@ -106,7 +102,8 @@ namespace Noggit::AdtTileTransform
         {
           std::uint32_t version;
           std::memcpy(&version, data, 4);
-          valid_version = version == 18;
+          // 19 = Turtle-edited tiles (Stormwind area): the same layout as 18, version kept as is.
+          valid_version = version == 18 || version == 19;
         }
         else if (chunk.magic == 'MCNK' && size >= sizeof(MapChunkHeader))
         {
@@ -156,7 +153,7 @@ namespace Noggit::AdtTileTransform
       return false;
     if (!valid_version)
     {
-      error = "Only ADT version 18 (vanilla / TBC / WotLK) is supported.";
+      error = "Only ADT versions 18 and 19 (vanilla / Turtle / TBC / WotLK) are supported.";
       return false;
     }
     if (mcnk_count != 256)

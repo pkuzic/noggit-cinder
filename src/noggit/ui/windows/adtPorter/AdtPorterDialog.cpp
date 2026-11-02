@@ -381,11 +381,7 @@ namespace
       visitor(*header, bytes.data() + data_position, header->size);
       position = end;
     }
-    if (position != bytes.size())
-    {
-      error = "ADT contains trailing data outside its chunk structure.";
-      return false;
-    }
+    // Fewer than 8 stray bytes cannot be a chunk: stock tiles end in such padding. Left untouched.
     return true;
   }
 
@@ -1111,7 +1107,8 @@ void AdtPorterDialog::portAdt()
 // it changes or removes is written first instead.
 void AdtPorterDialog::moveTiles()
 {
-  _status->setStyleSheet({});
+  // Every early return below reports a refusal or failure; only the success path turns this green.
+  _status->setStyleSheet("color: #d9534f;");
   QVariantMap const map = _source_map->currentData().toMap();
   QString const directory = map.value("directory").toString();
   int const map_id = map.value("id").toInt();
