@@ -834,7 +834,7 @@ bool liquid_layer::check_fatigue() const
 
 mclq liquid_layer::to_mclq(MH2O_Attributes& attributes) const
 {
-  mclq mclq_data;
+  mclq mclq_data{};
 
   mclq_data.min_height = _minimum;
   mclq_data.max_height = _maximum;
