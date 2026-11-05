@@ -84,6 +84,12 @@ uniform vec4 cursor_color;
 uniform bool draw_painted_stamp_selection;
 uniform vec2 painted_stamp_selection_origin;
 uniform bool enable_mists_heightmapping;
+#ifdef EVERWOOD_CARVE
+// One texel per 0.5-yd lattice cell of this tile, WoW axes: the voxel mesh is drawn there instead.
+uniform sampler2D everwood_mask;
+uniform bool everwood_mask_on;
+uniform vec2 everwood_mask_origin;
+#endif
 
 in vec3 vary_position;
 in vec2 vary_texcoord;
@@ -311,6 +317,18 @@ float contour_alpha(float unit_size, vec2 pos, vec2 line_width)
 
 void main()
 {
+#ifdef EVERWOOD_CARVE
+  if (everwood_mask_on)
+  {
+    const float ZEROPOINT = 32.0 * TILESIZE;
+    ivec2 cell = ivec2(floor(vec2(ZEROPOINT - vary_position.z, ZEROPOINT - vary_position.x) * 2.0) - everwood_mask_origin);
+    if (texelFetch(everwood_mask, cell, 0).r > 0.5)
+    {
+      discard;
+    }
+  }
+#endif
+
   float dist_from_camera = distance(camera, vary_position);
 
   vec3 fw = fwidth(vary_position.xyz);

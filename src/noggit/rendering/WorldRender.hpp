@@ -98,12 +98,20 @@ struct WorldRenderParams
   std::vector<std::vector<glm::vec3>> road_reference_mask_lines;
 };
 
+namespace Noggit::Everwood
+{
+  class EverwoodLayer;
+}
+
 namespace Noggit::Rendering
 {
   class WorldRender : public BaseRender
   {
   public:
     WorldRender(World* world);
+
+    // The Everwood voxel layer of this map, null outside Everwood Mode (then nothing of it runs).
+    void setEverwoodLayer(Noggit::Everwood::EverwoodLayer* layer) { _everwood_layer = layer; }
 
     void upload() override;
     void unload() override;
@@ -271,6 +279,8 @@ namespace Noggit::Rendering
     OpenGL::Scoped::deferred_upload_buffers<8> _buffers;
     GLuint const& _mvp_ubo = _buffers[0];
     GLuint const& _lighting_ubo = _buffers[1];
+    Noggit::Everwood::EverwoodLayer* _everwood_layer = nullptr;
+
     GLuint const& _terrain_params_ubo = _buffers[2];
     GLuint const& _mapchunk_vertex = _buffers[3];
     GLuint const& _mapchunk_index = _buffers[4];

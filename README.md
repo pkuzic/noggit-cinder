@@ -49,6 +49,9 @@ Prebuilt builds are also posted in the community Discord: https://discord.gg/Nqv
 This software is open source software licensed under GPL3, as found in
 the COPYING file.
 
+Everwood Mode (see EVERWOOD-MODE.md) includes a port of the Everwood client's voxel crates and of
+fast-surface-nets, both Apache-2.0 / MIT; the credits are in that file.
+
 # BUILDING #
 This project requires CMake to be built. 
 

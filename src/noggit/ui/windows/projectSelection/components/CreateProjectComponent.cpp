@@ -33,7 +33,8 @@ void CreateProjectComponent::createProject(Noggit::Ui::Windows::NoggitProjectSel
   application_project_service.createProject(project_information.project_path,
                                             project_information.game_client_path,
                                             project_information.game_client_version,
-                                            project_information.project_name);
+                                            project_information.project_name,
+                                            project_information.everwood_mode);
 
   RecentProjectsComponent::registerProjectChange(project_information.project_path);
 

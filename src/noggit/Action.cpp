@@ -56,6 +56,13 @@ void Noggit::Action::undo(bool redo)
   _map_view->context()->makeCurrent(_map_view->context()->surface());
   OpenGL::context::scoped_setter const _ (::gl, _map_view->context());
 
+  if (_flags & ActionFlags::eEVERWOOD_VOXEL)
+  {
+    for (auto& stroke : _everwood_strokes)
+    {
+      stroke(redo);
+    }
+  }
   if (_flags & ActionFlags::eCHUNKS_TERRAIN)
   {
     for (auto& pair : redo ? _chunk_terrain_post : _chunk_terrain_pre)
@@ -958,6 +965,11 @@ void Noggit::Action::registerAllChunkChanges(MapChunk* chunk)
   registerChunkShadowChange(chunk);
   registerChunkLayerInfoChange(chunk);
   registerChunkDetailDoodadExclusionChange(chunk);
+}
+
+void Noggit::Action::addEverwoodStroke(std::function<void(bool redo)> callback)
+{
+  _everwood_strokes.push_back(std::move(callback));
 }
 
 void Noggit::Action::registerAreaTriggerTransformed(area_trigger* trigger)

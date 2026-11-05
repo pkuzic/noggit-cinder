@@ -1,6 +1,8 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include "WorldRender.hpp"
+#include <noggit/everwood/EverwoodLayer.hpp>
+#include <noggit/project/CurrentProject.hpp>
 #include <external/PNG2BLP/Png2Blp.h>
 #include <external/tracy/Tracy.hpp>
 #include <math/frustum.hpp>
@@ -324,6 +326,11 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
     gl.disable(GL_BLEND);
 
+    if (_everwood_layer && !render_settings.minimap_render)
+    {
+      _everwood_layer->prepareFrame();
+    }
+
     {
       OpenGL::Scoped::use_program mcnk_shader{ *_mcnk_program.get() };
 
@@ -384,6 +391,18 @@ void WorldRender::draw (glm::mat4x4 const& model_view
                               glm::vec2(tile->xbase, tile->zbase));
         }
 
+        if (_everwood_layer)
+        {
+          if (render_settings.minimap_render)
+          {
+            mcnk_shader.uniform("everwood_mask_on", false);
+          }
+          else
+          {
+            _everwood_layer->bindTerrainMask(mcnk_shader, tile);
+          }
+        }
+
         tile->renderer()->draw(
             mcnk_shader
             , camera_pos
@@ -416,6 +435,11 @@ void WorldRender::draw (glm::mat4x4 const& model_view
       gl.activeTexture(static_cast<GLenum>(previous_active_texture));
       OpenGL::texture::current_active_texture =
           static_cast<std::size_t>(previous_active_texture - GL_TEXTURE0);
+    }
+
+    if (_everwood_layer && !render_settings.minimap_render)
+    {
+      _everwood_layer->draw(mvp, camera_pos);
     }
   }
 
@@ -1764,10 +1788,13 @@ void WorldRender::upload()
             }
       );
 
+  // Everwood Mode compiles the carve mask into the terrain shader; any other project gets today's shader.
+  bool const everwood_carve = Noggit::Project::CurrentProject::get()->EverwoodMode;
   _mcnk_program.reset
       ( new OpenGL::program
             { { GL_VERTEX_SHADER,   OpenGL::shader::src_from_qrc("terrain_vs") }
-                , { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("terrain_fs") }
+                , { GL_FRAGMENT_SHADER, everwood_carve ? OpenGL::shader::src_from_qrc("terrain_fs", { "EVERWOOD_CARVE" })
+                                                       : OpenGL::shader::src_from_qrc("terrain_fs") }
             }
       );
 
@@ -1856,6 +1883,10 @@ void WorldRender::upload()
     mcnk_shader.uniform("shadowmap", 2);
     mcnk_shader.uniform("alphamap", 3);
     mcnk_shader.uniform("stamp_brush", 4);
+    if (everwood_carve)
+    {
+      mcnk_shader.uniform("everwood_mask", 16);
+    }
     mcnk_shader.uniform("base_instance", 0);
 
     std::vector<int> samplers {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};

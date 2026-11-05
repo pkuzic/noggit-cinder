@@ -59,6 +59,8 @@ namespace Noggit::Project
             }
           }
 
+          project.EverwoodMode = project_configuration.value("EverwoodMode").toBool(false);
+
           if (project_configuration.contains("Patches") && project_configuration["Patches"].isArray())
           {
             auto project_patches = project_configuration["Patches"].toArray();

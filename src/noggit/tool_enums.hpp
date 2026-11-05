@@ -77,6 +77,7 @@ enum class editing_mode
   scripting = 12,
   chunk = 13,
   area_trigger = 14,
+  everwood = 15,      // only in a project with EverwoodMode
 };
 
 enum water_opacity

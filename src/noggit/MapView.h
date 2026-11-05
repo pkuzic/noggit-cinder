@@ -260,6 +260,8 @@ public:
   Noggit::Ui::minimap_widget* getMinimapWidget() const;
 
   void set_editing_mode (editing_mode);
+  // The ray through the mouse cursor, for tools that pick on their own geometry.
+  math::ray cursorRay() const;
   editing_mode get_editing_mode() const;;
 
   [[nodiscard]]

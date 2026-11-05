@@ -65,6 +65,11 @@ namespace Noggit::Project
     project_configuration.insert("PinnedMaps", pinned_maps);
     project_configuration.insert("Bookmarks", bookmarks);
     project_configuration.insert("Patches", patches);
+    // Only written when on: a project that never used it stays byte-identical.
+    if (project->EverwoodMode)
+    {
+      project_configuration.insert("EverwoodMode", true);
+    }
     project_configuration.insert("ProjectName", project->ProjectName.c_str());
     project_configuration.insert("Client", client_configuration);
     // project_configuration.insert("TexturePalettes", texture_palettes);

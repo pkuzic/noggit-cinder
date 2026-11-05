@@ -26,7 +26,7 @@ namespace Noggit::Project
     _configuration = configuration;
   }
 
-  void ApplicationProject::createProject(std::filesystem::path const& project_path, std::filesystem::path const& client_path, std::string const& client_version, std::string const& project_name)
+  void ApplicationProject::createProject(std::filesystem::path const& project_path, std::filesystem::path const& client_path, std::string const& client_version, std::string const& project_name, bool everwood_mode)
   {
     if (!std::filesystem::exists(project_path))
       std::filesystem::create_directory(project_path);
@@ -36,6 +36,7 @@ namespace Noggit::Project
     project.projectVersion = ClientVersionFactory::mapToEnumVersion(client_version);
     project.ClientPath = client_path.generic_string();
     project.ProjectPath = project_path.generic_string();
+    project.EverwoodMode = everwood_mode;
 
     auto project_writer = ApplicationProjectWriter();
     project_writer.saveProject(&project, project_path);
@@ -294,6 +295,12 @@ namespace Noggit::Project
             ch = static_cast<char>(ch - 'A' + 'a');
         return s;
       }
+    }
+
+    void NoggitProject::setEverwoodMode(bool enabled)
+    {
+      EverwoodMode = enabled;
+      _projectWriter->saveProject(this, std::filesystem::path(ProjectPath));
     }
 
     void NoggitProject::recordPatch(const NoggitProjectPatchRecord& record)

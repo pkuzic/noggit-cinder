@@ -3,6 +3,7 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <QMessageBox>
+#include <QCheckBox>
 
 #include <filesystem>
 
@@ -19,6 +20,10 @@ NoggitProjectCreationDialog::NoggitProjectCreationDialog(ProjectInformation& pro
   ui->expansion_icon->setPixmap(icon.pixmap(QSize(32, 32)));
   ui->expansion_icon->setObjectName("icon");
   ui->expansion_icon->setStyleSheet("QLabel#icon { padding: 0px }");
+
+  auto* everwood_mode = new QCheckBox("Everwood Mode (voxel tools, as in the game's map editor)", this);
+  everwood_mode->setToolTip("Adds the Everwood voxel layer and tool panel to the map view. Can be changed later in Noggit > Project Settings.");
+  ui->formLayout->addRow("", everwood_mode);
 
   QObject::connect(ui->project_expansion, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int index)
                    {
@@ -107,6 +112,7 @@ NoggitProjectCreationDialog::NoggitProjectCreationDialog(ProjectInformation& pro
                      }
 
                      project_information.game_client_version = ui->project_expansion->currentText().toStdString();
+                     project_information.everwood_mode = everwood_mode->isChecked();
 
 
                      done(QDialog::Accepted);

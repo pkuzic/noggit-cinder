@@ -72,6 +72,8 @@
 #include <noggit/tools/ObjectTool.hpp>
 #include <noggit/tools/MinimapTool.hpp>
 #include <noggit/tools/StampTool.hpp>
+#include <noggit/tools/EverwoodTool.hpp>
+#include <noggit/project/CurrentProject.hpp>
 #include <noggit/tools/LightTool.hpp>
 #include <noggit/tools/ScriptingTool.hpp>
 #include <noggit/tools/ChunkTool.hpp>
@@ -2500,6 +2502,10 @@ void MapView::createGUI()
   _tools.emplace_back(std::make_unique<Noggit::ScriptingTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::ChunkTool>(this))->setupUi(_tool_panel_dock);
   _tools.emplace_back(std::make_unique<Noggit::AreaTriggerTool>(this))->setupUi(_tool_panel_dock);
+  if (Noggit::Project::CurrentProject::get()->EverwoodMode)
+  {
+    _tools.emplace_back(std::make_unique<Noggit::EverwoodTool>(this))->setupUi(_tool_panel_dock);
+  }
 
   // End combined dock
 
@@ -3056,6 +3062,14 @@ MapView::~MapView()
       {
         _tools[static_cast<int>(editing_mode::paint)]->unload();
       }
+
+      for (auto& tool : _tools)
+      {
+        if (tool && tool->editingMode() == editing_mode::everwood)
+        {
+          tool->unload();
+        }
+      }
     }
 
     _world.reset();
@@ -3413,6 +3427,11 @@ glm::vec4 MapView::normalized_device_coords (int x, int y) const
 float MapView::aspect_ratio() const
 {
   return float (width()) / float (height());
+}
+
+math::ray MapView::cursorRay() const
+{
+  return intersect_ray();
 }
 
 math::ray MapView::intersect_ray() const

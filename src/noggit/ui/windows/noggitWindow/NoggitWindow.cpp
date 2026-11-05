@@ -47,6 +47,11 @@
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 #include <QtCore/QSettings>
+#include <QtWidgets/QCheckBox>
+#include <QtWidgets/QDialog>
+#include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QLabel>
+#include <QtWidgets/QVBoxLayout>
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QFile>
 #include <QtCore/QDateTime>
@@ -137,6 +142,9 @@ namespace Noggit::Ui::Windows
                      }
     );
 
+    auto project_settings_action(file_menu->addAction("Project Settings..."));
+    QObject::connect(project_settings_action, &QAction::triggered, this, [this] { showProjectSettings(); });
+
     auto adt_porter_action(file_menu->addAction("ADT Porting Tool..."));
     QObject::connect(adt_porter_action, &QAction::triggered, this, [this]
     {
@@ -206,6 +214,33 @@ namespace Noggit::Ui::Windows
     _map_creation_wizard = new Noggit::Ui::Tools::MapCreationWizard::Ui::MapCreationWizard(_project, this);
 
     buildMenu();
+  }
+
+  void NoggitWindow::showProjectSettings()
+  {
+    QDialog dialog(this);
+    dialog.setWindowTitle("Project Settings");
+    auto* layout = new QVBoxLayout(&dialog);
+
+    auto* everwood = new QCheckBox("Everwood Mode", &dialog);
+    everwood->setChecked(_project->EverwoodMode);
+    layout->addWidget(everwood);
+
+    auto* note = new QLabel("Adds the Everwood voxel layer and tool panel to the map view: the same voxel tools as "
+                            "the game's EME map editor. Edits are kept in the project's everwood folder, ADT files are "
+                            "never changed. Takes effect the next time a map is opened.", &dialog);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dialog.exec() == QDialog::Accepted && everwood->isChecked() != _project->EverwoodMode)
+    {
+      _project->setEverwoodMode(everwood->isChecked());
+    }
   }
 
   void NoggitWindow::check_uid_then_enter_map

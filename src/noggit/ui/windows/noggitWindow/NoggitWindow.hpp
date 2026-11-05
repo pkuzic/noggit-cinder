@@ -99,6 +99,8 @@ namespace Noggit::Ui::Windows
 
       void loadMap (int map_id);
 
+      void showProjectSettings();
+
       void check_uid_then_enter_map ( glm::vec3 pos
                                     , math::degrees camera_pitch
                                     , math::degrees camera_yaw

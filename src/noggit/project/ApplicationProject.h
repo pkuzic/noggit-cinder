@@ -124,6 +124,8 @@ namespace Noggit::Project
     std::vector<NoggitProjectTexturePalette> TexturePalettes;
     std::vector<NoggitProjectSelectionGroups> ObjectSelectionGroups;
     std::vector<NoggitProjectPatchRecord> Patches;
+    // Everwood Mode: the voxel layer and its tool panel in the map view. Absent from the file means false.
+    bool EverwoodMode = false;
 
     NoggitExtraMapData ExtraMapData;
     NoggitProject();
@@ -137,6 +139,9 @@ namespace Noggit::Project
     // Upsert (by lower-case Name) a patch record and persist the project. Called after a
     // successful MPQ export so the project remembers the patch it produced.
     void recordPatch(const NoggitProjectPatchRecord& record);
+
+    // Change the setting and persist the project. It takes effect the next time a map is opened.
+    void setEverwoodMode(bool enabled);
 
     // Returns the stored record for an archive name (case-insensitive), or nullptr if this
     // project never exported a patch by that name.
@@ -161,7 +166,7 @@ namespace Noggit::Project
     ApplicationProject(std::shared_ptr<Application::NoggitApplicationConfiguration> configuration);
 
     void createProject(std::filesystem::path const& project_path, std::filesystem::path const& client_path,
-                       std::string const& client_version, std::string const& project_name);
+                       std::string const& client_version, std::string const& project_name, bool everwood_mode = false);
 
     std::shared_ptr<NoggitProject> loadProject(std::filesystem::path const& project_path);
 

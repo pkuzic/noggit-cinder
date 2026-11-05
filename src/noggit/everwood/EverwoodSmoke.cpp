@@ -2,6 +2,10 @@
 
 #include <noggit/everwood/EverwoodSmoke.hpp>
 
+#include <noggit/ActionManager.hpp>
+#include <noggit/everwood/EverwoodLayer.hpp>
+#include <noggit/everwood/VoxelField.hpp>
+#include <noggit/tools/EverwoodTool.hpp>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 #include <noggit/Log.h>
@@ -11,7 +15,10 @@
 #include <noggit/project/ApplicationProject.h>
 #include <noggit/project/CurrentProject.hpp>
 #include <noggit/uid_storage.hpp>
+#include <noggit/ui/tools/UiCommon/StackedWidget.hpp>
+#include <noggit/ui/minimap_widget.hpp>
 #include <noggit/ui/windows/noggitWindow/NoggitWindow.hpp>
+#include <noggit/ui/windows/projectCreation/NoggitProjectCreationDialog.h>
 #include <opengl/context.hpp>
 #include <opengl/context.inl>
 
@@ -24,10 +31,15 @@
 #include <QtCore/QTextStream>
 #include <QtCore/QTimer>
 #include <QtGui/QImage>
+#include <QtGui/QMouseEvent>
+#include <QtWidgets/QApplication>
+#include <QtWidgets/QDialog>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -70,6 +82,14 @@ namespace Noggit::Everwood
             QFileInfo(scriptPath()).completeBaseName() + "_result.txt").toStdString())
     {
       QFile::remove(QString::fromStdString(_results));
+
+      {
+        // An unattended window in the background must keep drawing at full rate.
+        QSettings settings;
+        settings.setValue("background_fps_limit", false);
+        settings.setValue("updater/enabled", false);
+        settings.setValue("uid_startup_check", false);
+      }
 
       QFile script(scriptPath());
       if (!script.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -240,6 +260,9 @@ namespace Noggit::Everwood
       {
         finish(0);
       }
+      else if (runEverwood(cmd, a, line))
+      {
+      }
       else
       {
         report("FAIL unknown command " + cmd.toStdString());
@@ -285,8 +308,268 @@ namespace Noggit::Everwood
       placeWindow();
     }
 
+    Noggit::EverwoodTool* everwoodTool()
+    {
+      if (!_view)
+        return nullptr;
+      for (auto& tool : _view->_tools)
+        if (tool && tool->editingMode() == editing_mode::everwood)
+          return static_cast<Noggit::EverwoodTool*>(tool.get());
+      return nullptr;
+    }
+
+    Noggit::EverwoodTool* requireTool()
+    {
+      auto* tool = everwoodTool();
+      if (!tool)
+      {
+        report("FAIL no Everwood tool in this map view");
+        finish(8);
+      }
+      return tool;
+    }
+
+    void mouse(QEvent::Type type, int x, int y, Qt::MouseButton button, Qt::MouseButtons held)
+    {
+      QPointF const pos(x, y);
+      QMouseEvent event(type, pos, pos, _view->mapToGlobal(pos.toPoint()), button, held, Qt::NoModifier);
+      QApplication::sendEvent(_view, &event);
+    }
+
+    void expect(bool ok, std::string const& what)
+    {
+      report((ok ? "PASS " : "FAIL ") + what);
+      if (!ok)
+        _failed = true;
+    }
+
+    std::string hashText()
+    {
+      char buf[32];
+      std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(requireTool()->layer()->stateHash()));
+      return buf;
+    }
+
+    bool runEverwood(QString const& cmd, QStringList const& a, QString const& line)
+    {
+      auto f = [&](int i) { return a.value(i).toFloat(); };
+
+      if (cmd == "golden")
+      {
+        std::string text;
+        bool const ok = Noggit::Everwood::Voxel::RunGolden(line.mid(cmd.size() + 1).trimmed().toStdString().c_str(), text);
+        report(text);
+        expect(ok, "golden vectors inside noggit.exe");
+      }
+      else if (cmd == "project_everwood")
+      {
+        _project->setEverwoodMode(a.value(1).toInt() != 0);
+        report(std::string("project EverwoodMode set to ") + (_project->EverwoodMode ? "true" : "false"));
+      }
+      else if (cmd == "expect_project_everwood")
+      {
+        expect(_project->EverwoodMode == (a.value(1).toInt() != 0), "project EverwoodMode == " + a.value(1).toStdString());
+      }
+      else if (cmd == "expect_no_everwood")
+      {
+        expect(everwoodTool() == nullptr, "no Everwood tool, panel or toolbar entry");
+      }
+      else if (cmd == "tool")
+      {
+        requireTool();
+        _view->set_editing_mode(editing_mode::everwood);
+        report(std::string("active tool: ") + _view->activeTool()->name());
+      }
+      else if (cmd == "set")
+      {
+        expect(requireTool()->setOption(a.value(1), a.value(2)), "option " + a.value(1).toStdString() + " = " + a.value(2).toStdString());
+      }
+      else if (cmd == "move")
+      {
+        mouse(QEvent::MouseMove, a.value(1).toInt(), a.value(2).toInt(), Qt::NoButton, _held);
+      }
+      else if (cmd == "press")
+      {
+        mouse(QEvent::MouseMove, a.value(1).toInt(), a.value(2).toInt(), Qt::NoButton, Qt::NoButton);
+        _held = Qt::LeftButton;
+        mouse(QEvent::MouseButtonPress, a.value(1).toInt(), a.value(2).toInt(), Qt::LeftButton, _held);
+      }
+      else if (cmd == "release")
+      {
+        _held = Qt::NoButton;
+        mouse(QEvent::MouseButtonRelease, a.value(1).toInt(), a.value(2).toInt(), Qt::LeftButton, _held);
+      }
+      else if (cmd == "undo")
+      {
+        requireTool()->undo();
+      }
+      else if (cmd == "redo")
+      {
+        requireTool()->redo();
+      }
+      else if (cmd == "edit")
+      {
+        // edit <mode> <x> <y> <z> <radius> <strength> <param>: one stroke of one exact edit
+        Noggit::Everwood::Voxel::Edit e;
+        e.mode = uint8_t(a.value(1).toInt());
+        e.pos[0] = f(2);
+        e.pos[1] = f(3);
+        e.pos[2] = f(4);
+        e.radius = f(5);
+        e.strength = uint8_t(a.value(6).toInt());
+        e.param = uint16_t(a.value(7).toInt(nullptr, 0));
+        requireTool()->applyStroke({ e });
+      }
+      else if (cmd == "bridge")
+      {
+        // bridge <ax> <ay> <az> <bx> <by> <bz>: the two picks + Build
+        auto* tool = requireTool();
+        tool->cancelBridge();
+        tool->setBridgePoint(glm::vec3(f(1), f(2), f(3)));
+        tool->setBridgePoint(glm::vec3(f(4), f(5), f(6)));
+        tool->confirmBridge();
+      }
+      else if (cmd == "ground")
+      {
+        float h = 0.f;
+        bool const ok = requireTool()->layer()->rawGround(f(1), f(2), h);
+        report("raw ground at " + a.value(1).toStdString() + " " + a.value(2).toStdString() + (ok ? " = " + std::to_string(h) : " = none"));
+      }
+      else if (cmd == "status")
+      {
+        auto* layer = requireTool()->layer();
+        report("edits " + std::to_string(layer->liveEditCount()) + " strokes " + std::to_string(layer->strokeCount())
+               + " active chunks " + std::to_string(layer->activeChunkCount()) + " hidden cells " + std::to_string(layer->hiddenCellCount())
+               + " hash " + hashText());
+      }
+      else if (cmd == "expect_edits")
+      {
+        size_t const n = requireTool()->layer()->liveEditCount();
+        bool const atLeast = a.value(1).startsWith('>');
+        size_t const want = a.value(1).mid(atLeast ? 1 : 0).toULongLong();
+        expect(atLeast ? n > want : n == want, "live edits " + std::to_string(n) + " vs " + a.value(1).toStdString());
+      }
+      else if (cmd == "expect_hidden")
+      {
+        size_t const n = requireTool()->layer()->hiddenCellCount();
+        bool const atLeast = a.value(1).startsWith('>');
+        size_t const want = a.value(1).mid(atLeast ? 1 : 0).toULongLong();
+        expect(atLeast ? n > want : n == want, "hidden terrain cells " + std::to_string(n) + " vs " + a.value(1).toStdString());
+      }
+      else if (cmd == "hash_save")
+      {
+        // hash_save <name>: remember the state hash in this run and in a file next to the script
+        std::string const h = hashText();
+        _hashes[a.value(1).toStdString()] = h;
+        QFile file(QFileInfo(scriptPath()).absoluteDir().absoluteFilePath("hash_" + a.value(1) + ".txt"));
+        if (file.open(QIODevice::WriteOnly))
+          file.write(h.c_str());
+        report("hash " + a.value(1).toStdString() + " = " + h);
+      }
+      else if (cmd == "hash_same" || cmd == "hash_differs")
+      {
+        std::string const h = hashText();
+        std::string other;
+        auto it = _hashes.find(a.value(1).toStdString());
+        if (it != _hashes.end())
+          other = it->second;
+        else
+        {
+          QFile file(QFileInfo(scriptPath()).absoluteDir().absoluteFilePath("hash_" + a.value(1) + ".txt"));
+          if (file.open(QIODevice::ReadOnly))
+            other = file.readAll().toStdString();
+        }
+        bool const same = h == other;
+        expect(cmd == "hash_same" ? same : !same, "state hash " + h + (cmd == "hash_same" ? " == " : " != ") + a.value(1).toStdString() + " " + other);
+      }
+      else if (cmd == "export")
+      {
+        std::string const path = requireTool()->exportEdits();
+        expect(!path.empty(), "export written: " + path);
+      }
+      else if (cmd == "reseed")
+      {
+        requireTool()->layer()->reseed();
+      }
+      else if (cmd == "camera_last")
+      {
+        // camera_last <distance> <height over the ground> [side]: look at the last edit
+        auto const* edit = requireTool()->layer()->lastEdit();
+        if (!edit)
+        {
+          expect(false, "camera_last: no edit");
+          return true;
+        }
+        float const dist = f(1), height = f(2), side = f(3);
+        // Yaw 0 looks along Noggit +z (WoW -x), positive pitch looks down.
+        _view->_camera.position = glm::vec3(ZEROPOINT - edit->pos[1] - side, height, ZEROPOINT - edit->pos[0] - dist);
+        float const ground = requireTool()->layer()->rawGround(edit->pos[0], edit->pos[1], _scratch) ? _scratch : edit->pos[2];
+        _view->_camera.position.y = ground + height;
+        _view->_camera.yaw(math::degrees(std::atan2(side, dist) * 57.29578f));
+        _view->_camera.pitch(math::degrees(std::atan2(height, std::sqrt(dist * dist + side * side)) * 57.29578f));
+        _view->_camera_moved_since_last_draw = true;
+        report("camera at edit " + std::to_string(edit->pos[0]) + " " + std::to_string(edit->pos[1]) + " " + std::to_string(edit->pos[2]));
+      }
+      else if (cmd == "settings_dialog_shot")
+      {
+        QString const path = line.mid(cmd.size() + 1).trimmed();
+        QTimer::singleShot(600, [this, path]
+        {
+          if (QWidget* dialog = QApplication::activeModalWidget())
+          {
+            expect(dialog->grab().save(path), "dialog screenshot " + path.toStdString());
+            static_cast<QDialog*>(dialog)->reject();
+          }
+          else
+          {
+            expect(false, "no modal dialog to grab");
+          }
+        });
+        _window->showProjectSettings();
+      }
+      else if (cmd == "creation_dialog_shot")
+      {
+        ProjectInformation information;
+        NoggitProjectCreationDialog dialog(information, _window);
+        dialog.show();
+        QApplication::processEvents();
+        expect(dialog.grab().save(line.mid(cmd.size() + 1).trimmed()), "creation dialog screenshot");
+        dialog.hide();
+      }
+      else if (cmd == "return_to_menu")
+      {
+        // What the exit prompt's "Return to menu" does: the whole map view goes, GL resources included.
+        _window->_stack_widget->setCurrentIndex(0);
+        _window->_stack_widget->removeLast();
+        delete _window->_map_view;
+        _window->_map_view = nullptr;
+        _window->_minimap->world(nullptr);
+        _window->map_loaded = false;
+        _view = nullptr;
+        report("returned to the map list");
+      }
+      else if (cmd == "objects")
+      {
+        // objects 0|1: draw WMOs and doodads, for an unobstructed view of the ground
+        bool const on = a.value(1).toInt() != 0;
+        _view->_draw_wmo.set(on);
+        _view->_draw_models.set(on);
+      }
+      else if (cmd == "panel_shot")
+      {
+        QPixmap const pixmap = _window->grab();
+        expect(pixmap.save(line.mid(cmd.size() + 1).trimmed()), "window screenshot " + line.mid(cmd.size() + 1).trimmed().toStdString());
+      }
+      else
+      {
+        return false;
+      }
+      return true;
+    }
+
     void shot(QString const& path)
     {
+      _view->_needs_redraw = true;
       QImage const image = _view->grabFramebuffer();
       if (image.isNull() || !image.save(path))
       {
@@ -309,6 +592,9 @@ namespace Noggit::Everwood
     Noggit::Ui::Windows::NoggitWindow* _window = nullptr;
     MapView* _view = nullptr;
     int _map_id = 0;
+    Qt::MouseButtons _held = Qt::NoButton;
+    float _scratch = 0.f;
+    std::map<std::string, std::string> _hashes;
 
     int _left = 2580, _top = 20, _width = 1500, _height = 950;
 

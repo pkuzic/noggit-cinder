@@ -14,6 +14,7 @@ struct ProjectInformation
     std::string project_path;
     std::string game_client_path;
     std::string game_client_version;
+    bool everwood_mode = false;
 };
 
 class NoggitProjectCreationDialog : public QDialog

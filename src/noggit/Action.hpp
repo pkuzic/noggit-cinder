@@ -45,6 +45,7 @@ namespace Noggit
         eSKY_TRANSFORMED          = 0x10000,
         eSKY_ADDED                = 0x20000,
         eSKY_REMOVED              = 0x40000,
+        eEVERWOOD_VOXEL           = 0x80000, // a stroke on the Everwood voxel layer
     };
 
     enum ActionModalityControllers
@@ -152,6 +153,8 @@ namespace Noggit
         void registerChunkDetailDoodadExclusionChange(MapChunk* chunk);
         void registerAllChunkChanges(MapChunk* chunk);
         void registerAreaTriggerTransformed(area_trigger* trigger);
+        // Everwood voxel strokes keep their own state: undo / redo calls back with the direction.
+        void addEverwoodStroke(std::function<void(bool redo)> callback);
         void registerSkyTransformed(Sky* sky);
         void registerSkyAdded(Sky* sky);
         void registerSkyRemoved(Sky* sky);
@@ -190,6 +193,7 @@ namespace Noggit
         // attribute/depth/UV edits undo/redo, not just layer coverage/height (Azure port).
         std::vector<std::pair<MapChunk*, ChunkWaterState>> _chunk_liquid_pre;
         std::vector<std::pair<MapChunk*, ChunkWaterState>> _chunk_liquid_post;
+        std::vector<std::function<void(bool redo)>> _everwood_strokes;
         std::vector<std::pair<uint32_t, area_trigger>> _transformed_area_trigger_pre;
         std::vector<std::pair<uint32_t, area_trigger>> _transformed_area_trigger_post;
         std::vector<SkyTransformCache> _transformed_sky_pre, _transformed_sky_post;
