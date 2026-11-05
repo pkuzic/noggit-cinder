@@ -62,6 +62,8 @@ namespace Noggit
 
         void hidePopups() override;
 
+        Ui::texturing_tool* texturingPanel() { return _texturingTool; }
+
     private:
         // Road sub-mode state machine (ported from Noggit Azure):
         // selecting_reference -> reference_ready -> routing -> commit.

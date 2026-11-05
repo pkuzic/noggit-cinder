@@ -6,12 +6,19 @@
 #include <noggit/everwood/EverwoodLayer.hpp>
 #include <noggit/everwood/VoxelField.hpp>
 #include <noggit/tools/EverwoodTool.hpp>
+#include <noggit/tools/TexturingTool.hpp>
+#include <noggit/ui/TexturingGUI.h>
+#include <noggit/ui/texturing_tool.hpp>
+#include <noggit/rendering/WorldRender.hpp>
+#include <noggit/TextureManager.h>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 #include <noggit/Log.h>
 #include <noggit/MapHeaders.h>
 #include <noggit/MapView.h>
 #include <noggit/World.h>
+#include <noggit/World.inl>
+#include <noggit/MapChunk.h>
 #include <noggit/project/ApplicationProject.h>
 #include <noggit/project/CurrentProject.hpp>
 #include <noggit/uid_storage.hpp>
@@ -535,6 +542,78 @@ namespace Noggit::Everwood
         QApplication::processEvents();
         expect(dialog.grab().save(line.mid(cmd.size() + 1).trimmed()), "creation dialog screenshot");
         dialog.hide();
+      }
+      else if (cmd == "paint_tool")
+      {
+        // paint_tool <texture path> <radius> <pressure 0..1> <hardness 0..1>: Texture Paint, ready to paint
+        _view->set_editing_mode(editing_mode::paint);
+        Noggit::TexturingTool* tool = nullptr;
+        for (auto& t : _view->_tools)
+          if (t && t->editingMode() == editing_mode::paint)
+            tool = static_cast<Noggit::TexturingTool*>(t.get());
+        if (!tool)
+        {
+          expect(false, "no Texture Paint tool");
+          return true;
+        }
+        Noggit::Ui::selected_texture::set(scoped_blp_texture_reference(a.value(1).toStdString(), _view->_context));
+        tool->texturingPanel()->setRadius(f(2));
+        tool->texturingPanel()->set_pressure(f(3));
+        tool->texturingPanel()->setHardness(f(4));
+        report(std::string("active tool: ") + _view->activeTool()->name());
+      }
+      else if (cmd == "everwood_tool")
+      {
+        _view->set_editing_mode(editing_mode::everwood);
+      }
+      else if (cmd == "shift")
+      {
+        _view->_smoke_hold_shift = a.value(1).toInt() != 0;
+      }
+      else if (cmd == "cursor")
+      {
+        // cursor [expect_voxel 0|1]: where the cursor is, WoW axes, and whether it sits on the voxel surface
+        glm::vec3 const p = Noggit::Everwood::noggitToWow(_view->_cursor_pos);
+        report("cursor " + std::to_string(p.x) + " " + std::to_string(p.y) + " " + std::to_string(p.z)
+               + " on_voxel " + std::to_string(int(_view->_cursor_on_voxel_surface))
+               + " under_map " + std::to_string(int(_view->getWorld()->isUnderMap(_view->_cursor_pos))));
+        if (a.size() > 1)
+          expect(_view->_cursor_on_voxel_surface == (a.value(1).toInt() != 0), "cursor on voxel == " + a.value(1).toStdString());
+      }
+      else if (cmd == "overlay")
+      {
+        // overlay shadows|mccv|lines 0|1
+        auto* block = _view->getWorld()->renderer()->getTerrainParamsUniformBlock();
+        int const on = a.value(2).toInt();
+
+        if (a.value(1) == "shadows") block->draw_shadows = on;
+        else if (a.value(1) == "mccv") block->draw_vertex_color = on;
+        else if (a.value(1) == "lines") block->draw_lines = on;
+        _view->getWorld()->renderer()->markTerrainParamsUniformBlockDirty();
+      }
+      else if (cmd == "tint")
+      {
+        // tint <wow x> <wow y> <radius> <r> <g> <b>: vertex colours 0..2 on the ADT at a spot, as vertex paint does
+        glm::vec3 const center = Noggit::Everwood::wowToNoggit(glm::vec3(f(1), f(2), 0.f));
+        _view->makeCurrent();
+        OpenGL::context::scoped_setter const _(::gl, _view->context());
+        _view->getWorld()->for_all_chunks_in_range(center, f(3), [&](MapChunk* chunk)
+        {
+          chunk->initMCCV();
+          glm::vec3 const color(f(4), f(5), f(6));
+          for (int i = 0; i < mapbufsize; ++i)
+            chunk->mccv[i] = color;
+          chunk->registerChunkUpdate(ChunkUpdateFlags::MCCV);
+          return true;
+        });
+      }
+      else if (cmd == "action_undo")
+      {
+        NOGGIT_ACTION_MGR->undo();
+      }
+      else if (cmd == "action_redo")
+      {
+        NOGGIT_ACTION_MGR->redo();
       }
       else if (cmd == "return_to_menu")
       {

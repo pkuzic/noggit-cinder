@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include <math/ray.hpp>
 #include <noggit/BoolToggleProperty.hpp>
 #include <noggit/Camera.hpp>
@@ -95,6 +97,7 @@ public:
   bool _mod_alt_down = false;
   bool _mod_ctrl_down = false;
   bool _mod_shift_down = false;
+  bool _smoke_hold_shift = false; // only the smoke-test hook sets it
   bool _mod_space_down = false;
   bool _mod_num_down = false;
 
@@ -111,6 +114,7 @@ private:
   float moving, strafing, updown, mousedir, turn, lookat;
   CursorType _cursorType;
   glm::vec3 _cursor_pos;
+  bool _cursor_on_voxel_surface = false;
   QPoint _drag_start_pos;
   QPoint _right_click_pos;
   float _cursorRotation;
@@ -156,6 +160,8 @@ public:
 private:
 
   void update_cursor_pos();
+  // Everwood Mode: moves the cursor from the ADT, possibly hidden, to the voxel surface the ray really meets.
+  void everwood_cursor_on_surface(std::optional<glm::vec3> const& terrain_hit);
 
   display_mode _display_mode;
 

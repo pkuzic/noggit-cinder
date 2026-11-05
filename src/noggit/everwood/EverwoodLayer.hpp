@@ -47,6 +47,17 @@ namespace Noggit::Everwood
     glm::vec3 normal;   // WoW axes, unit length
   };
 
+  // The brush circle the terrain shader draws on the ground, for the part of the ground the mesh replaced.
+  struct VoxelCursor
+  {
+    int type = 0;             // CursorType: 0 none
+    glm::vec3 position{ 0.f };
+    float rotation = 0.f;
+    float radius = 0.f;
+    float innerRatio = 0.f;
+    glm::vec4 color{ 1.f };
+  };
+
   class EverwoodLayer
   {
   public:
@@ -70,6 +81,10 @@ namespace Noggit::Everwood
     bool rawGround(float wowX, float wowY, float& height);
     // world.rs raymarch through the field (active chunk) or the raw ADT ground + lift (elsewhere).
     std::optional<AimHit> raycast(glm::vec3 const& wowOrigin, glm::vec3 const& wowDir, float maxDist);
+    // Where a terrain tool's cursor belongs, Noggit axes: the voxel surface when the ray meets it around an edit
+    // before any visible terrain. terrainHit is the ray's ADT hit, which may be under or over the mesh.
+    std::optional<glm::vec3> surfaceUnderCursor(glm::vec3 const& origin, glm::vec3 const& dir
+                                               , std::optional<glm::vec3> const& terrainHit);
 
     size_t liveEditCount() const { return _journal.Edits().size(); }
     Voxel::Edit const* lastEdit() const { return _journal.Edits().empty() ? nullptr : &_journal.Edits().back(); }
@@ -92,7 +107,7 @@ namespace Noggit::Everwood
     // ---- rendering, called by WorldRender with a current context
     void prepareFrame();
     void bindTerrainMask(OpenGL::Scoped::use_program& shader, MapTile* tile);
-    void draw(glm::mat4x4 const& mvp, glm::vec3 const& cameraPos, bool drawFogAndLight = true);
+    void draw(glm::mat4x4 const& mvp, glm::vec3 const& cameraPos, VoxelCursor const& cursor);
     void releaseGl();
 
   private:
@@ -109,16 +124,23 @@ namespace Noggit::Everwood
       bool surfaceOk = false;            // every surface chunk of the column is active
     };
 
+    // An ADT chunk a mesh took its layers from, and the chunk's MapChunk::appearanceStamp() at that moment.
+    struct ChunkSource
+    {
+      int tileX, tileZ, cx, cz;
+      std::uint32_t stamp;
+    };
+
     struct ChunkGl
     {
       unsigned vao = 0;
       unsigned vbo = 0;
-      unsigned ibo = 0;
-      int indexCount = 0;
+      int indexCount = 0;                // vertices of the triangle list
       glm::vec3 boundsMin{ 0.f };
       glm::vec3 boundsMax{ 0.f };
       std::vector<unsigned> arrays;      // texture arrays by sampler slot
       std::vector<scoped_blp_texture_reference> keepAlive;
+      std::vector<ChunkSource> sources;
     };
 
     struct TileMask
@@ -149,6 +171,9 @@ namespace Noggit::Everwood
     void freeChunkGl(ChunkGl& gl);
 
     float aimDensity(glm::vec3 const& p);
+    // Steps from t (unit direction, WoW axes) to the first solid; on a hit t is the hit's distance.
+    std::optional<AimHit> march(glm::vec3 const& origin, glm::vec3 const& dir, float& t, float tEnd);
+    bool cellHiddenAt(float wowX, float wowY) const;
 
     ::World* _world;
     std::string _projectPath;
@@ -168,6 +193,7 @@ namespace Noggit::Everwood
     std::unordered_set<Voxel::Key, Voxel::KeyHash> _dirtyMeshes;
     std::unordered_map<Voxel::Key, ChunkGl, Voxel::KeyHash> _meshes;
     std::unordered_map<int, TileMask> _masks;
+    glm::vec3 _editedMin{ 1.f }, _editedMax{ 0.f };   // WoW axes; empty when max < min
 
     std::unique_ptr<OpenGL::program> _program;
     QOpenGLContext* _glContext = nullptr;

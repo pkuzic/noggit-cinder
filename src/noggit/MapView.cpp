@@ -3104,7 +3104,7 @@ MapView::~MapView()
 
 void MapView::tick (float dt)
 {
-	_mod_shift_down = QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
+	_mod_shift_down = _smoke_hold_shift || QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
 	_mod_ctrl_down = QApplication::keyboardModifiers().testFlag(Qt::ControlModifier);
 	_mod_alt_down = QApplication::keyboardModifiers().testFlag(Qt::AltModifier);
 	_mod_num_down = QApplication::keyboardModifiers().testFlag(Qt::KeypadModifier);
@@ -3266,7 +3266,8 @@ void MapView::tick (float dt)
   Noggit::TickParameters tickParams
   {
       .displayMode = _display_mode,
-      .underMap = _world->isUnderMap(_cursor_pos),
+      // A dug floor lies under the ADT without being under the map.
+      .underMap = !_cursor_on_voxel_surface && _world->isUnderMap(_cursor_pos),
       .camera_moved_since_last_draw = _camera_moved_since_last_draw,
       .left_mouse = leftMouse,
       .right_mouse = rightMouse,
@@ -3557,6 +3558,10 @@ void MapView::doSelection (bool selectTerrainOnly, bool mouseMove)
       _cursor_pos = hit.index() == eEntry_Object ? std::get<selected_object_type>(hit)->pos
                                                  : hit.index() == eEntry_MapChunk ? std::get<selected_chunk_type>(hit).position
                                                                                   : throw std::logic_error("bad variant");
+      if (hit.index() == eEntry_MapChunk)
+      {
+        everwood_cursor_on_surface(std::get<selected_chunk_type>(hit).position);
+      }
     }
 
   }
@@ -3616,13 +3621,31 @@ void MapView::update_cursor_pos()
 
   selection_result results (intersect_result (true));
 
+  std::optional<glm::vec3> terrain_hit;
   if (!results.empty())
   {
     auto const& hit(results.front().second);
     // hit cannot be something else than a chunk
     auto const& chunkHit = std::get<selected_chunk_type>(hit);
     _cursor_pos = chunkHit.position;
+    terrain_hit = chunkHit.position;
+  }
+  everwood_cursor_on_surface(terrain_hit);
+}
 
+void MapView::everwood_cursor_on_surface(std::optional<glm::vec3> const& terrain_hit)
+{
+  _cursor_on_voxel_surface = false;
+
+  auto* layer = _world ? _world->renderer()->everwoodLayer() : nullptr;
+  if (!layer)
+    return;
+
+  math::ray const ray = intersect_ray();
+  if (auto const surface = layer->surfaceUnderCursor(ray.origin(), ray.position(1.f) - ray.origin(), terrain_hit))
+  {
+    _cursor_pos = *surface;
+    _cursor_on_voxel_surface = true;
   }
 }
 

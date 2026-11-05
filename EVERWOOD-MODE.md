@@ -18,7 +18,7 @@ false, and the key is only written when true, so a project that never used it do
 
 ## The tools
 
-The **Everwood** entry at the end of the left toolbar (the stamp-style icon) opens the panel:
+The **Everwood** entry at the end of the left toolbar (the terrain icon, tooltip "Everwood") opens the panel:
 
 | Tool | What it does |
 |---|---|
@@ -34,8 +34,19 @@ remaining edits, the same canonical rebuild as the game.
 
 **Re-seed from saved ADTs** replays every edit on the heights as saved on disk now. The seed reads the raw ADT
 through Noggit's project-then-client file lookup, so unsaved terrain edits do not move the voxel surface until
-they are saved and re-seeded. Terrain painted or sculpted under an edited area with Noggit's other tools still
-edits the ADT as usual, but that part of the ADT stays hidden while the voxel edit is there.
+they are saved and re-seeded. Terrain sculpted under an edited area with Noggit's other tools still edits the ADT
+as usual, but that part of the ADT stays hidden while the voxel edit is there.
+
+## Painting voxel ground
+
+Use the normal **Texture Paint** tool (Shift + left mouse). The cursor and the brush land on the voxel surface where
+the ray meets it around an edit: on top of a build, on the floor of a dig. Painting edits the ADT chunk's own layers
+and alpha maps, as everywhere else, and the mesh is rebuilt from them at once, so no Re-seed or reopen is needed.
+Vertex paint and shadow edits are picked up the same way. Undo works through Noggit's action history as usual, and
+the paint is saved with the ADT. The voxel edits, their wire format and their density do not change.
+
+Steep walls and undersides keep the fixed wall look of CONTRACT v3.3.6, as the game does: painting changes the ADT
+layers under them, which shows only on the tops and gentle slopes.
 
 ## How it is drawn
 
@@ -46,8 +57,12 @@ only over the 0.5-yd lattice cells whose columns actually changed, and the mesh 
 a two-cell overlap. Untouched ground stays the real ADT with all its layers, shadows and vertex colours. The
 density, the edits and everything saved are unaffected by this.
 
-The mesh uses the terrain's own layers and alpha maps per vertex. It does not have the terrain's MCSH shadows,
-MCCV vertex colours, animated layers or Mists height blending.
+The mesh takes everything from the live ADT chunk under it: layers, alpha maps (sampled as the terrain's GL_LINEAR
+does), specular flags, MCCV vertex colours and MCSH shadows, with the terrain's lighting, in the terrain's normal
+convention (WoW x, up, WoW y). A triangle across an ADT chunk line is cut along it, so the seam lies where the
+terrain's lies. Its shader also draws the brush cursor, the grid lines, the height contours and the normals view.
+It does not have animated layers, Mists height blending, wireframe or the per-chunk overlays (area, impassable,
+paintability, selection, ground effects).
 
 ## Files
 
@@ -131,7 +146,8 @@ goes to `settings/` next to the script, and results go to `<script>_result.txt`.
 `edit mode x y z radius strength param`, `bridge ax ay az bx by bz`, `ground x y`, `status`,
 `expect_edits [>]n`, `expect_hidden [>]n`, `hash_save <name>`, `hash_same <name>`, `hash_differs <name>`,
 `export`, `reseed`, `objects 0|1`, `camera_last dist height [side]`, `return_to_menu`, `settings_dialog_shot <png>`,
-`creation_dialog_shot <png>`.
+`creation_dialog_shot <png>`, `paint_tool <texture> <radius> <pressure> <hardness>`, `everwood_tool`, `shift 0|1`,
+`cursor [0|1]`, `overlay shadows|mccv|lines 0|1`, `tint x y radius r g b`, `action_undo`, `action_redo`.
 
 ## Credits
 

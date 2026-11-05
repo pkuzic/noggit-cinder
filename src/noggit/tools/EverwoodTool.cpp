@@ -200,7 +200,7 @@ namespace Noggit
 
   Ui::FontNoggit::Icons EverwoodTool::icon() const
   {
-    return Ui::FontNoggit::TOOL_STAMP;
+    return Ui::FontNoggit::VISIBILITY_TERRAIN;
   }
 
   ToolDrawParameters EverwoodTool::drawParameters() const
@@ -226,6 +226,13 @@ namespace Noggit
     auto* intro = new QLabel("Voxel edits, the same as the game's EME map editor. ADT files are never changed.", _panel);
     intro->setWordWrap(true);
     outer->addWidget(intro);
+
+    auto* paintNote = new QLabel(
+      "Texturing: paint voxel ground with the normal Texture Paint tool (Shift + left mouse). It edits the ADT's own "
+      "layers, so it shows on the voxel surface at once and is saved with the ADT. Tops and gentle slopes take the "
+      "paint. Steep walls and undersides keep their fixed rock look, as in the game, and cannot be painted.", _panel);
+    paintNote->setWordWrap(true);
+    outer->addWidget(paintNote);
 
     _form = new QFormLayout();
     outer->addLayout(_form);

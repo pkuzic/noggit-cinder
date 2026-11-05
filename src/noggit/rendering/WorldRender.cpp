@@ -439,7 +439,14 @@ void WorldRender::draw (glm::mat4x4 const& model_view
 
     if (_everwood_layer && !render_settings.minimap_render)
     {
-      _everwood_layer->draw(mvp, camera_pos);
+      Noggit::Everwood::VoxelCursor voxel_cursor;
+      voxel_cursor.type = static_cast<int>(render_settings.cursor_type);
+      voxel_cursor.position = cursor_pos;
+      voxel_cursor.rotation = render_settings.cursorRotation;
+      voxel_cursor.radius = render_settings.brush_radius;
+      voxel_cursor.innerRatio = render_settings.inner_radius_ratio;
+      voxel_cursor.color = cursor_color;
+      _everwood_layer->draw(mvp, camera_pos, voxel_cursor);
     }
   }
 

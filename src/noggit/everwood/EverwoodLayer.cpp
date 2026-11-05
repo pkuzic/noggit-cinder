@@ -47,6 +47,7 @@ namespace Noggit::Everwood
     constexpr int FIRST_TEXTURE_UNIT = 5;   // the terrain shader's own 11 layer samplers
     constexpr int NUM_TEXTURE_UNITS = 11;
     constexpr float AIM_STEP = 0.5f;
+    constexpr int LAYER_SPECULAR = 1 << 20; // on a mesh layer id: keep the texture's specular mask
 
     std::string toHex(uint8_t const* data, size_t n)
     {
@@ -111,6 +112,29 @@ namespace Noggit::Everwood
     float clamp01(float v)
     {
       return v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+    }
+
+    // A point of a chunk's 145-vertex grid: the three vertices of the terrain's triangle fan around each cell's
+    // centre vertex, and their weights. u, w run over the chunk, 0..1.
+    struct FanPoint
+    {
+      int index[3];
+      float weight[3];
+    };
+
+    FanPoint fanPoint(float u, float w)
+    {
+      float const cu = std::clamp(u * 8.f, 0.f, 8.f), cw = std::clamp(w * 8.f, 0.f, 8.f);
+      int const ci = std::min(int(cu), 7), cj = std::min(int(cw), 7);
+      float const a = cu - float(ci), b = cw - float(cj);
+      int const tl = cj * 17 + ci, tr = tl + 1, bl = tl + 17, br = tl + 18, ctr = cj * 17 + 9 + ci;
+      if (b <= a && b <= 1.f - a)
+        return { { ctr, tr, tl }, { 2.f * b, a - b, 1.f - a - b } };
+      if (a >= b && a >= 1.f - b)
+        return { { ctr, br, tr }, { 2.f * (1.f - a), b - (1.f - a), a - b } };
+      if (b >= a && b >= 1.f - a)
+        return { { ctr, br, bl }, { 2.f * (1.f - b), a - (1.f - b), b - a } };
+      return { { ctr, bl, tl }, { 2.f * a, b - a, 1.f - a - b } };
     }
 
     float smoothstep01(float a, float b, float v)
@@ -433,6 +457,19 @@ namespace Noggit::Everwood
     for (ColKey const& col : _dirtyColumns)
       writeMaskAround(col);
     _dirtyColumns.clear();
+
+    // The box the cursor looks for the voxel surface in.
+    _editedMin = glm::vec3(std::numeric_limits<float>::max());
+    _editedMax = glm::vec3(std::numeric_limits<float>::lowest());
+    for (auto const& kv : _field.ChunksRef())
+    {
+      auto const column = _columns.find(ColKey{ kv.first[0], kv.first[1] });
+      if (column == _columns.end() || !column->second.any)
+        continue;
+      glm::vec3 const low(float(kv.first[0]) * CHUNK_YARDS, float(kv.first[1]) * CHUNK_YARDS, float(kv.first[2]) * CHUNK_YARDS);
+      _editedMin = glm::min(_editedMin, low);
+      _editedMax = glm::max(_editedMax, low + glm::vec3(CHUNK_YARDS));
+    }
   }
 
   size_t EverwoodLayer::hiddenCellCount() const
@@ -493,13 +530,19 @@ namespace Noggit::Everwood
     if (len < 1e-6f)
       return std::nullopt;
     glm::vec3 const d = dirIn / len;
+    float t = 0.f;
+    return march(origin, d, t, maxDist);
+  }
+
+  std::optional<AimHit> EverwoodLayer::march(glm::vec3 const& origin, glm::vec3 const& d, float& tInOut, float tEnd)
+  {
     auto at = [&](float t) { return origin + d * t; };
 
-    if (aimDensity(origin) < 0.f)
+    if (aimDensity(at(tInOut)) < 0.f)
       return std::nullopt;   // the camera is under the ground: aim at nothing rather than at itself
 
-    float prev = 0.f;
-    for (float t = AIM_STEP; t <= maxDist; t += AIM_STEP)
+    float prev = tInOut;
+    for (float t = tInOut + AIM_STEP; t <= tEnd; t += AIM_STEP)
     {
       if (aimDensity(at(t)) < 0.f)
       {
@@ -512,6 +555,7 @@ namespace Noggit::Everwood
           else
             a = m;
         }
+        tInOut = b;
         glm::vec3 const p = at(b);
         float const h = VOXEL_SIZE;
         glm::vec3 g(aimDensity(p + glm::vec3(h, 0, 0)) - aimDensity(p - glm::vec3(h, 0, 0))
@@ -523,6 +567,79 @@ namespace Noggit::Everwood
       prev = t;
     }
     return std::nullopt;
+  }
+
+  bool EverwoodLayer::cellHiddenAt(float wowX, float wowY) const
+  {
+    int tx, ty;
+    Adt::WorldToTile(wowX, wowY, tx, ty);
+    auto it = _masks.find(tx * 64 + ty);
+    if (it == _masks.end() || it->second.pixels.empty())
+      return false;
+    int const u = int(std::floor(wowX / VOXEL_SIZE)) - it->second.origin.x, v = int(std::floor(wowY / VOXEL_SIZE)) - it->second.origin.y;
+    if (u < 0 || v < 0 || u >= MASK_SIZE || v >= MASK_SIZE)
+      return false;
+    return it->second.pixels[size_t(u) + size_t(v) * MASK_SIZE] != 0;
+  }
+
+  std::optional<glm::vec3> EverwoodLayer::surfaceUnderCursor(glm::vec3 const& originNoggit, glm::vec3 const& dirNoggit
+                                                            , std::optional<glm::vec3> const& terrainHitNoggit)
+  {
+    if (_journal.Edits().empty() || _editedMax.x < _editedMin.x)
+      return std::nullopt;
+
+    glm::vec3 const origin = noggitToWow(originNoggit);
+    glm::vec3 d = noggitToWow(originNoggit + dirNoggit) - origin;
+    float const len = glm::length(d);
+    if (len < 1e-6f)
+      return std::nullopt;
+    d /= len;
+
+    // Only the box of what was edited: a long ray elsewhere must not read ADT after ADT from the disk.
+    float tMin = 0.f, tMax = 20000.f;
+    for (int a = 0; a < 3; ++a)
+    {
+      if (std::fabs(d[a]) < 1e-6f)
+      {
+        if (origin[a] < _editedMin[a] || origin[a] > _editedMax[a])
+          return std::nullopt;
+        continue;
+      }
+      float t0 = (_editedMin[a] - origin[a]) / d[a], t1 = (_editedMax[a] - origin[a]) / d[a];
+      if (t0 > t1)
+        std::swap(t0, t1);
+      tMin = std::max(tMin, t0);
+      tMax = std::min(tMax, t1);
+    }
+    if (tMin > tMax)
+      return std::nullopt;
+
+    float t = tMin;
+    if (!march(origin, d, t, tMax + AIM_STEP))
+      return std::nullopt;
+    glm::vec3 const hit = origin + d * t;
+
+    // The mesh is only drawn around changed columns; elsewhere the real terrain is what the mapper sees.
+    int32_t const ix = int32_t(std::floor(hit.x / VOXEL_SIZE)), iy = int32_t(std::floor(hit.y / VOXEL_SIZE));
+    bool nearChange = false;
+    for (int32_t y = iy - 2; y <= iy + 3 && !nearChange; ++y)
+      for (int32_t x = ix - 2; x <= ix + 3; ++x)
+        if (columnChangedAt(x, y))
+        {
+          nearChange = true;
+          break;
+        }
+    if (!nearChange)
+      return std::nullopt;
+
+    // Visible terrain in front of the surface still wins; terrain the mesh replaces does not count.
+    if (terrainHitNoggit)
+    {
+      glm::vec3 const terrain = noggitToWow(*terrainHitNoggit);
+      if (glm::length(terrain - origin) + 0.5f < t && !cellHiddenAt(terrain.x, terrain.y))
+        return std::nullopt;
+    }
+    return wowToNoggit({ hit.x, hit.y, hit.z - RENDER_DROP });
   }
 
   // -------------------------------------------------------------------------------------------- storage
@@ -815,6 +932,7 @@ namespace Noggit::Everwood
     {
       out.keepAlive.clear();
       out.arrays.clear();
+      out.sources.clear();
       return true;
     }
 
@@ -826,6 +944,7 @@ namespace Noggit::Everwood
     {
       out.keepAlive.clear();
       out.arrays.clear();
+      out.sources.clear();
       return true;
     }
 
@@ -847,15 +966,14 @@ namespace Noggit::Everwood
     std::unordered_map<int, ChunkLayers> layersByChunk;
     std::vector<scoped_blp_texture_reference> keepAlive;
     std::vector<unsigned> arrays;
+    std::vector<ChunkSource> sources;
     bool waiting = false;
 
-    auto layersAt = [&](glm::vec3 const& noggit) -> ChunkLayers const*
+    // The one ADT chunk that paints a piece of the mesh: its layers, alpha, shadow and vertex colour.
+    auto layersOf = [&](int tileX, int tileZ, int cx, int cz) -> ChunkLayers const*
     {
-      int const tileX = int(std::floor(noggit.x / TILESIZE)), tileZ = int(std::floor(noggit.z / TILESIZE));
       if (tileX < 0 || tileZ < 0 || tileX >= 64 || tileZ >= 64)
         return nullptr;
-      int const cx = std::clamp(int(std::floor((noggit.x - float(tileX) * TILESIZE) / CHUNKSIZE)), 0, 15);
-      int const cz = std::clamp(int(std::floor((noggit.z - float(tileZ) * TILESIZE) / CHUNKSIZE)), 0, 15);
       int const id = (tileX * 64 + tileZ) * 256 + cz * 16 + cx;
       auto found = layersByChunk.find(id);
       if (found != layersByChunk.end())
@@ -880,6 +998,8 @@ namespace Noggit::Everwood
         if (chunk && chunk->texture_set)
         {
           layers.chunk = chunk;
+          // Read before the textures: a stamp bumped while this runs is seen on the next frame.
+          sources.push_back({ tileX, tileZ, cx, cz, chunk->appearanceStamp() });
           auto& textures = chunk->texture_set->renderTextures();
           layers.count = std::min<int>(4, int(chunk->texture_set->renderTextureCount()));
           for (int k = 0; k < layers.count; ++k)
@@ -899,7 +1019,9 @@ namespace Noggit::Everwood
               arrays.push_back(array);
               slot = arrays.end() - 1;
             }
-            layers.tex[k] = int(slot - arrays.begin()) * 4096 + textures[k]->array_index();
+            // The terrain drops a layer's specular mask with a negative array index, so -0 keeps it.
+            bool const specular = textures[k]->is_specular() || textures[k]->array_index() == 0;
+            layers.tex[k] = int(slot - arrays.begin()) * 4096 + textures[k]->array_index() + (specular ? LAYER_SPECULAR : 0);
             keepAlive.push_back(textures[k]);
           }
         }
@@ -922,19 +1044,25 @@ namespace Noggit::Everwood
     float const uvBaseU = std::floor(originNoggit.x / unitSize) * unitSize;
     float const uvBaseV = std::floor(originNoggit.z / unitSize) * unitSize;
 
-    constexpr size_t STRIDE = 16;
-    std::vector<float> vertices(nv * STRIDE);
+    struct MeshVertex
+    {
+      glm::vec3 pos, normal;
+      float wall;
+    };
+    auto mixVertex = [](MeshVertex const& a, MeshVertex const& b, float t) -> MeshVertex
+    {
+      return { glm::mix(a.pos, b.pos, t), glm::mix(a.normal, b.normal, t), a.wall + (b.wall - a.wall) * t };
+    };
+
+    std::vector<MeshVertex> shaped(nv);
     std::vector<uint8_t> vertexNear(nv, 0);
-    glm::vec3 bmin(std::numeric_limits<float>::max()), bmax(std::numeric_limits<float>::lowest());
     for (size_t i = 0; i < nv; ++i)
     {
       float const wx = origin[0] + mesh.pos[i * 3], wy = origin[1] + mesh.pos[i * 3 + 1], wz = origin[2] + mesh.pos[i * 3 + 2];
-      glm::vec3 const p = wowToNoggit({ wx, wy, wz - RENDER_DROP });
       vertexNear[i] = cellNear(wx, wy) ? 1 : 0;
       glm::vec3 const g(mesh.nrm[i * 3], mesh.nrm[i * 3 + 1], mesh.nrm[i * 3 + 2]);
       float const gl_ = glm::length(g);
       glm::vec3 const nw = gl_ > 1e-6f ? g / gl_ : glm::vec3(0, 0, 1);
-      glm::vec3 const n(-nw.y, nw.z, -nw.x);
 
       // CONTRACT v3.3.6: an EDITED face keeps the ground's look while nearly level or within ~40 degrees of
       // the seeded ground's normal, and turns to the wall layer only where it faces away from it. A face
@@ -943,89 +1071,191 @@ namespace Noggit::Everwood
       if (nw.z < -0.3f)
         wall = std::max(wall, edited[i]);
 
-      float* v = &vertices[i * STRIDE];
-      v[0] = p.x; v[1] = p.y; v[2] = p.z;
-      v[3] = n.x; v[4] = n.y; v[5] = n.z;
-      v[6] = (p.x - uvBaseU) / unitSize;
-      v[7] = (p.z - uvBaseV) / unitSize;
-      v[8] = v[9] = v[10] = 0.f;
-      v[11] = wall;
-      v[12] = v[13] = v[14] = v[15] = -1.f;
+      // The normal in the terrain's own convention, which its lighting expects: MCNR order as MapChunk loads
+      // it, WoW x, up, WoW y. Noggit's world axes (-WoW y, up, -WoW x) would light any slope wrongly.
+      glm::vec3 const pos = wowToNoggit({ wx, wy, wz - RENDER_DROP });
+      glm::vec3 normal(nw.x, nw.z, nw.y);
 
-      if (vertexNear[i])
+      // The ADT's stored normals are smoothed and differ from the seed's geometry by a degree or two. Carry that
+      // difference over, so untouched ground is lit exactly as the terrain beside it and an edit only adds its
+      // own change of slope. Walls have nothing to match.
+      if (wall < 1.f)
       {
-        bmin = glm::min(bmin, p);
-        bmax = glm::max(bmax, p);
-        ChunkLayers const* layers = layersAt(p);
+        int const gx = int(std::floor(pos.x / CHUNKSIZE)), gz = int(std::floor(pos.z / CHUNKSIZE));
+        ChunkLayers const* layers = gx >= 0 && gz >= 0 ? layersOf(gx / 16, gz / 16, gx % 16, gz % 16) : nullptr;
         if (waiting)
           return false;
-        if (layers && layers->chunk)
+        float const fx = mesh.pos[i * 3] / VOXEL_SIZE, fy = mesh.pos[i * 3 + 1] / VOXEL_SIZE;
+        int32_t const sx = std::clamp(int32_t(std::floor(fx)), 0, SAMPLES - 2), sy = std::clamp(int32_t(std::floor(fy)), 0, SAMPLES - 2);
+        float const h00 = seedHeights[size_t(sx) + size_t(sy) * SAMPLES], h10 = seedHeights[size_t(sx + 1) + size_t(sy) * SAMPLES];
+        float const h01 = seedHeights[size_t(sx) + size_t(sy + 1) * SAMPLES], h11 = seedHeights[size_t(sx + 1) + size_t(sy + 1) * SAMPLES];
+        if (layers && layers->chunk && std::isfinite(h00) && std::isfinite(h10) && std::isfinite(h01) && std::isfinite(h11))
         {
-          for (int k = 0; k < 4; ++k)
-            v[12 + k] = float(layers->tex[k]);
-          // Noggit's alpha lookup: 64 x 64 per chunk, row along z, column along x.
-          float const u = (p.x - layers->chunk->xbase) / CHUNKSIZE;
-          float const w = (p.z - layers->chunk->zbase) / CHUNKSIZE;
-          int const ax = std::clamp(int(u * 64.f), 0, 63), az = std::clamp(int(w * 64.f), 0, 63);
-          size_t const offset = size_t(az) * 64 + size_t(ax);
-          auto* textureSet = layers->chunk->texture_set.get();
-          auto& temp = textureSet->getTempAlphamaps();
-          auto* alphamaps = textureSet->getAlphamaps();
-          for (int a = 0; a + 1 < layers->count && a < 3; ++a)
+          float const tx = std::clamp(fx - float(sx), 0.f, 1.f), ty = std::clamp(fy - float(sy), 0.f, 1.f);
+          float const dhx = ((h10 - h00) * (1.f - ty) + (h11 - h01) * ty) / VOXEL_SIZE;
+          float const dhy = ((h01 - h00) * (1.f - tx) + (h11 - h10) * tx) / VOXEL_SIZE;
+          glm::vec3 const seedNormal = glm::normalize(glm::vec3(-dhx, 1.f, -dhy));
+
+          MapChunk* chunk = layers->chunk;
+          auto const& buffer = chunk->mt->getChunkHeightmapBuffer();
+          size_t const start = size_t(chunk->px * 16 + chunk->py) * mapbufsize * 4;
+          FanPoint const fan = fanPoint((pos.x - chunk->xbase) / CHUNKSIZE, (pos.z - chunk->zbase) / CHUNKSIZE);
+          glm::vec3 stored(0.f);
+          for (int k = 0; k < 3; ++k)
           {
-            if (temp)
-              v[8 + a] = (*temp)[a + 1][offset];
-            else if ((*alphamaps)[a])
-              v[8 + a] = float((*alphamaps)[a]->getAlpha(offset)) / 255.f;
+            size_t const at = start + size_t(fan.index[k]) * 4;
+            stored += glm::vec3(buffer[at], buffer[at + 1], buffer[at + 2]) * fan.weight[k];
           }
+          glm::vec3 const delta = stored - seedNormal;
+          // More than ~20 degrees: the ADT was sculpted since the seed, the difference means nothing until a Re-seed.
+          if (glm::dot(delta, delta) < 0.12f)
+            normal = glm::normalize(normal + delta * (1.f - wall));
         }
       }
+      shaped[i] = { pos, normal, wall };
     }
 
-    std::vector<uint32_t> indices;
-    indices.reserve(mesh.idx.size());
-    for (size_t t = 0; t + 2 < mesh.idx.size(); t += 3)
-      if (vertexNear[mesh.idx[t]] || vertexNear[mesh.idx[t + 1]] || vertexNear[mesh.idx[t + 2]])
-      {
-        indices.push_back(mesh.idx[t]);
-        indices.push_back(mesh.idx[t + 1]);
-        indices.push_back(mesh.idx[t + 2]);
-      }
+    constexpr size_t STRIDE = 20;
+    std::vector<float> vertices;
+    vertices.reserve(mesh.idx.size() * STRIDE);
+    glm::vec3 bmin(std::numeric_limits<float>::max()), bmax(std::numeric_limits<float>::lowest());
 
-    // Triangles reaching a not-near vertex need that vertex's textures too.
-    for (uint32_t index : indices)
+    auto addVertex = [&](MeshVertex const& m, ChunkLayers const* layers)
     {
-      float* v = &vertices[size_t(index) * STRIDE];
-      if (vertexNear[index])
-        continue;
-      glm::vec3 const p(v[0], v[1], v[2]);
-      bmin = glm::min(bmin, p);
-      bmax = glm::max(bmax, p);
-      ChunkLayers const* layers = layersAt(p);
-      if (waiting)
-        return false;
+      float v[STRIDE];
+      v[0] = m.pos.x; v[1] = m.pos.y; v[2] = m.pos.z;
+      v[3] = m.normal.x; v[4] = m.normal.y; v[5] = m.normal.z;
+      v[6] = (m.pos.x - uvBaseU) / unitSize;
+      v[7] = (m.pos.z - uvBaseV) / unitSize;
+      v[8] = v[9] = v[10] = 0.f;
+      v[11] = m.wall;
+      v[12] = v[13] = v[14] = v[15] = -1.f;
+      v[16] = v[17] = v[18] = 1.f;
+      v[19] = 0.f;
       if (layers && layers->chunk)
+      {
         for (int k = 0; k < 4; ++k)
           v[12 + k] = float(layers->tex[k]);
+        MapChunk* chunk = layers->chunk;
+        float const u = (m.pos.x - chunk->xbase) / CHUNKSIZE;
+        float const w = (m.pos.z - chunk->zbase) / CHUNKSIZE;
+
+        // Alpha and shadow maps: what GL_LINEAR + GL_CLAMP_TO_EDGE returns for the terrain, 64 x 64 per chunk,
+        // row along z, column along x.
+        float const fx = std::clamp(u * 64.f - 0.5f, 0.f, 63.f), fz = std::clamp(w * 64.f - 0.5f, 0.f, 63.f);
+        int const x0 = int(fx), z0 = int(fz), x1 = std::min(x0 + 1, 63), z1 = std::min(z0 + 1, 63);
+        float const tx = fx - float(x0), tz = fz - float(z0);
+        size_t const o00 = size_t(z0) * 64 + size_t(x0), o10 = size_t(z0) * 64 + size_t(x1);
+        size_t const o01 = size_t(z1) * 64 + size_t(x0), o11 = size_t(z1) * 64 + size_t(x1);
+        auto bilinear = [&](auto const& read)
+        {
+          return (read(o00) * (1.f - tx) + read(o10) * tx) * (1.f - tz) + (read(o01) * (1.f - tx) + read(o11) * tx) * tz;
+        };
+        auto* textureSet = chunk->texture_set.get();
+        auto& temp = textureSet->getTempAlphamaps();
+        auto* alphamaps = textureSet->getAlphamaps();
+        for (int a = 0; a + 1 < layers->count && a < 3; ++a)
+        {
+          if (temp)
+            v[8 + a] = bilinear([&](size_t o) { return (*temp)[a + 1][o] / 255.f; });
+          else if ((*alphamaps)[a])
+            v[8 + a] = bilinear([&](size_t o) { return float((*alphamaps)[a]->getAlpha(o)) / 255.f; });
+        }
+        v[19] = bilinear([&](size_t o) { return float(chunk->_shadow_map[o]) / 255.f; });
+
+        // Vertex colours: the terrain's own triangle fan around each cell's centre vertex.
+        FanPoint const fan = fanPoint(u, w);
+        glm::vec3 color(0.f);
+        for (int k = 0; k < 3; ++k)
+          color += chunk->mccv[fan.index[k]] * fan.weight[k];
+        v[16] = color.r; v[17] = color.g; v[18] = color.b;
+      }
+      vertices.insert(vertices.end(), v, v + STRIDE);
+      bmin = glm::min(bmin, m.pos);
+      bmax = glm::max(bmax, m.pos);
+    };
+
+    // A triangle wears one chunk: layer sets are per chunk and in a chunk's own order, so a triangle across a
+    // chunk line is cut along it, and the seam falls exactly where the terrain's does.
+    std::vector<MeshVertex> poly, clipped;
+    auto clipAxis = [&](bool xAxis, float limit, bool keepBelow)
+    {
+      clipped.clear();
+      auto inside = [&](MeshVertex const& m)
+      {
+        float const c = xAxis ? m.pos.x : m.pos.z;
+        return keepBelow ? c <= limit : c >= limit;
+      };
+      for (size_t i = 0; i < poly.size(); ++i)
+      {
+        MeshVertex const& a = poly[i];
+        MeshVertex const& b = poly[(i + 1) % poly.size()];
+        bool const ia = inside(a), ib = inside(b);
+        if (ia)
+          clipped.push_back(a);
+        if (ia != ib)
+        {
+          float const ca = xAxis ? a.pos.x : a.pos.z, cb = xAxis ? b.pos.x : b.pos.z;
+          clipped.push_back(mixVertex(a, b, (limit - ca) / (cb - ca)));
+        }
+      }
+      poly.swap(clipped);
+    };
+
+    for (size_t t = 0; t + 2 < mesh.idx.size(); t += 3)
+    {
+      uint32_t const i0 = mesh.idx[t], i1 = mesh.idx[t + 1], i2 = mesh.idx[t + 2];
+      if (!vertexNear[i0] && !vertexNear[i1] && !vertexNear[i2])
+        continue;
+      MeshVertex const& a = shaped[i0];
+      MeshVertex const& b = shaped[i1];
+      MeshVertex const& c = shaped[i2];
+      int const gx0 = int(std::floor(std::min({ a.pos.x, b.pos.x, c.pos.x }) / CHUNKSIZE));
+      int const gx1 = int(std::floor(std::max({ a.pos.x, b.pos.x, c.pos.x }) / CHUNKSIZE));
+      int const gz0 = int(std::floor(std::min({ a.pos.z, b.pos.z, c.pos.z }) / CHUNKSIZE));
+      int const gz1 = int(std::floor(std::max({ a.pos.z, b.pos.z, c.pos.z }) / CHUNKSIZE));
+      for (int gz = gz0; gz <= gz1; ++gz)
+        for (int gx = gx0; gx <= gx1; ++gx)
+        {
+          ChunkLayers const* layers = layersOf(gx >= 0 ? gx / 16 : -1, gz >= 0 ? gz / 16 : -1, gx >= 0 ? gx % 16 : 0, gz >= 0 ? gz % 16 : 0);
+          if (waiting)
+            return false;
+          if (gx0 == gx1 && gz0 == gz1)
+          {
+            addVertex(a, layers);
+            addVertex(b, layers);
+            addVertex(c, layers);
+            continue;
+          }
+          poly = { a, b, c };
+          clipAxis(true, float(gx) * CHUNKSIZE, false);
+          clipAxis(true, float(gx + 1) * CHUNKSIZE, true);
+          clipAxis(false, float(gz) * CHUNKSIZE, false);
+          clipAxis(false, float(gz + 1) * CHUNKSIZE, true);
+          for (size_t k = 1; k + 1 < poly.size(); ++k)
+          {
+            addVertex(poly[0], layers);
+            addVertex(poly[k], layers);
+            addVertex(poly[k + 1], layers);
+          }
+        }
     }
 
     out.boundsMin = bmin;
     out.boundsMax = bmax;
-    out.indexCount = int(indices.size());
+    out.indexCount = int(vertices.size() / STRIDE);
     out.arrays = std::move(arrays);
     out.keepAlive = std::move(keepAlive);
+    out.sources = std::move(sources);
 
     if (!out.vao)
     {
       gl.genVertexArrays(1, &out.vao);
       gl.genBuffers(1, &out.vbo);
-      gl.genBuffers(1, &out.ibo);
     }
     gl.bindVertexArray(out.vao);
     gl.bindBuffer(GL_ARRAY_BUFFER, out.vbo);
     gl.bufferData(GL_ARRAY_BUFFER, GLsizeiptr(vertices.size() * sizeof(float)), vertices.data(), GL_DYNAMIC_DRAW);
-    gl.bindBuffer(GL_ELEMENT_ARRAY_BUFFER, out.ibo);
-    gl.bufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(indices.size() * sizeof(uint32_t)), indices.data(), GL_DYNAMIC_DRAW);
 
     GLsizei const stride = GLsizei(STRIDE * sizeof(float));
     // The locations are fixed in everwood_voxel_vert.glsl.
@@ -1040,12 +1270,14 @@ namespace Noggit::Everwood
     attrib(3, 3, 8);    // alpha
     attrib(4, 1, 11);   // wall
     attrib(5, 4, 12);   // layers
+    attrib(6, 3, 16);   // vertex colour
+    attrib(7, 1, 19);   // baked shadow
     gl.bindVertexArray(0);
     gl.bindBuffer(GL_ARRAY_BUFFER, 0);
     return true;
   }
 
-  void EverwoodLayer::draw(glm::mat4x4 const& mvp, glm::vec3 const& cameraPos, bool)
+  void EverwoodLayer::draw(glm::mat4x4 const& mvp, glm::vec3 const& cameraPos, VoxelCursor const& cursor)
   {
     if (_journal.Edits().empty() && _meshes.empty())
       return;
@@ -1059,11 +1291,29 @@ namespace Noggit::Everwood
       OpenGL::Scoped::use_program shader{ *_program };
       shader.bind_uniform_block("matrices", 0);
       shader.bind_uniform_block("lighting", 1);
+      shader.bind_uniform_block("overlay_params", 2);
+      shader.uniform("stamp_brush", 4);   // the unit the terrain's stamp cursor uses
       std::vector<int> samplers;
       for (int i = 0; i < NUM_TEXTURE_UNITS; ++i)
         samplers.push_back(FIRST_TEXTURE_UNIT + i);
       shader.uniform("textures", samplers);
     }
+
+    // Terrain painted, or otherwise recoloured, since the mesh was built: rebuild it from the chunks as they
+    // are now. Nothing here touches the density.
+    for (auto const& kv : _meshes)
+      for (ChunkSource const& source : kv.second.sources)
+      {
+        TileIndex const index(static_cast<std::size_t>(source.tileX), static_cast<std::size_t>(source.tileZ));
+        if (!_world->mapIndex.tileLoaded(index))
+          continue;
+        MapChunk* chunk = _world->mapIndex.getTile(index)->getChunk(static_cast<unsigned>(source.cx), static_cast<unsigned>(source.cz));
+        if (chunk && chunk->appearanceStamp() != source.stamp)
+        {
+          _dirtyMeshes.insert(kv.first);
+          break;
+        }
+      }
 
     // Everything edited since the last frame, and whatever waited for its tile.
     for (auto it = _dirtyMeshes.begin(); it != _dirtyMeshes.end();)
@@ -1086,6 +1336,15 @@ namespace Noggit::Everwood
     {
       OpenGL::Scoped::use_program shader{ *_program };
       shader.uniform("camera", cameraPos);
+      shader.uniform("draw_cursor_circle", cursor.type);
+      if (cursor.type != 0)
+      {
+        shader.uniform("cursor_position", cursor.position);
+        shader.uniform("cursorRotation", cursor.rotation);
+        shader.uniform("outer_cursor_radius", cursor.radius);
+        shader.uniform("inner_cursor_ratio", cursor.innerRatio);
+        shader.uniform("cursor_color", cursor.color);
+      }
       for (auto const& kv : _meshes)
       {
         ChunkGl const& mesh = kv.second;
@@ -1097,7 +1356,7 @@ namespace Noggit::Everwood
           gl.bindTexture(GL_TEXTURE_2D_ARRAY, i < int(mesh.arrays.size()) ? mesh.arrays[i] : 0);
         }
         gl.bindVertexArray(mesh.vao);
-        gl.drawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
+        gl.drawArraysInstanced(GL_TRIANGLES, 0, mesh.indexCount, 1);
       }
     }
 
@@ -1113,9 +1372,8 @@ namespace Noggit::Everwood
     {
       gl.deleteVertexArray(1, &mesh.vao);
       gl.deleteBuffers(1, &mesh.vbo);
-      gl.deleteBuffers(1, &mesh.ibo);
     }
-    mesh.vao = mesh.vbo = mesh.ibo = 0;
+    mesh.vao = mesh.vbo = 0;
     mesh.indexCount = 0;
   }
 
@@ -1124,7 +1382,7 @@ namespace Noggit::Everwood
     // The context changed: the old handles are gone with it, every mesh and mask is uploaded again.
     for (auto& kv : _meshes)
     {
-      kv.second.vao = kv.second.vbo = kv.second.ibo = 0;
+      kv.second.vao = kv.second.vbo = 0;
       kv.second.indexCount = 0;
       _dirtyMeshes.insert(kv.first);
     }

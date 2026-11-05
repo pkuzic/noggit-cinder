@@ -257,6 +257,8 @@ public:
   void requeueChunkUpdate(unsigned flags);
   void endChunkUpdates();
   unsigned getUpdateFlags() const;
+  // Counts edits to what the chunk looks like (layers, alpha, vertex colours, shadows, normals), so a derived mesh can notice.
+  std::uint32_t appearanceStamp() const { return _appearance_stamp; }
 
   // Detail-doodad (client ground-clutter) cache, regenerated when the chunk is edited,
   // the ground-effect DBCs change, or the density setting moves. Ported from Noggit Azure.
@@ -268,5 +270,6 @@ public:
 private:
   std::unique_ptr<Noggit::ChunkDetailDoodads> _detail_doodads;
   std::uint32_t _detail_doodad_stamp = 0;
+  std::uint32_t _appearance_stamp = 0;
   bool _doodad_mapping_needs_update = false;
 };

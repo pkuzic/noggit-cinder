@@ -112,6 +112,7 @@ namespace Noggit::Rendering
 
     // The Everwood voxel layer of this map, null outside Everwood Mode (then nothing of it runs).
     void setEverwoodLayer(Noggit::Everwood::EverwoodLayer* layer) { _everwood_layer = layer; }
+    Noggit::Everwood::EverwoodLayer* everwoodLayer() const { return _everwood_layer; }
 
     void upload() override;
     void unload() override;

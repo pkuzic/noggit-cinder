@@ -7,6 +7,8 @@ layout (location = 2) in vec2 texcoord;
 layout (location = 3) in vec3 alpha;
 layout (location = 4) in float wall;
 layout (location = 5) in vec4 layers;
+layout (location = 6) in vec3 mccv;
+layout (location = 7) in float shadow;
 
 layout (std140) uniform matrices
 {
@@ -20,6 +22,8 @@ out vec2 vary_uv;
 out vec3 vary_alpha;
 out float vary_wall;
 flat out vec4 vary_layers;
+out vec3 vary_mccv;
+out float vary_shadow;
 
 void main()
 {
@@ -30,4 +34,6 @@ void main()
   vary_alpha = alpha;
   vary_wall = wall;
   vary_layers = layers;
+  vary_mccv = mccv;
+  vary_shadow = shadow;
 }
