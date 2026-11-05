@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <noggit/everwood/EverwoodSmoke.hpp>
 
 class MapView;
 class StackedWidget;
@@ -58,6 +59,7 @@ namespace Noggit::Ui::Windows
       Q_OBJECT
 
       friend class Noggit::Ui::Component::BuildMapListComponent;
+      friend class Noggit::Everwood::SmokeRunner;
 
     public:
       NoggitWindow(std::shared_ptr<Noggit::Application::NoggitApplicationConfiguration> application,

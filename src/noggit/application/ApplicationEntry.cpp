@@ -2,6 +2,7 @@
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/errorHandling.h>
+#include <noggit/everwood/EverwoodSmoke.hpp>
 #include <noggit/ui/windows/projectSelection/NoggitProjectSelectionWindow.hpp>
 
 #include <qcommandlineoption.h>
@@ -29,6 +30,8 @@ int main(int argc, char *argv[])
   Noggit::RegisterErrorHandlers();
   std::set_terminate(Noggit::Application::NoggitApplication::terminationHandler);
 
+  Noggit::Everwood::smokePrepareSettings();
+
   QApplication::setStyle(QStyleFactory::create("Fusion"));
   QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
   QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
@@ -50,6 +53,13 @@ int main(int argc, char *argv[])
   if (!initialized) [[unlikely]]
   {
     return EXIT_FAILURE;
+  }
+
+  // Everwood smoke-test hook: inert unless NOGGIT_EVERWOOD_SMOKE is set.
+  if (Noggit::Everwood::smokeEnabled())
+  {
+    Noggit::Everwood::smokeStart(noggit);
+    return q_application.exec();
   }
 
   auto project_selection = new Noggit::Ui::Windows::NoggitProjectSelectionWindow(noggit);

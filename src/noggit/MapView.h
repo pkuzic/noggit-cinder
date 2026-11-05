@@ -85,9 +85,12 @@ enum class save_mode
   all
 };
 
+namespace Noggit::Everwood { class SmokeRunner; }
+
 class MapView : public Noggit::Ui::Tools::ViewportManager::Viewport
 {
   Q_OBJECT
+  friend class Noggit::Everwood::SmokeRunner;
 public:
   bool _mod_alt_down = false;
   bool _mod_ctrl_down = false;
