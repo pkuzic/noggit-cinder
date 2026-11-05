@@ -18,7 +18,42 @@
 #include <math/frustum.hpp>
 #include <math/ray.hpp>
 
+#include <noggit/project/CurrentProject.hpp>
+
+#include <algorithm>
+#include <cmath>
 #include <sstream>
+
+bool WMOInstance::scaleEditable()
+{
+  return Noggit::Project::CurrentProject::get() && Noggit::Project::CurrentProject::get()->EverwoodMode;
+}
+
+float WMOInstance::clampEditScale(float scale)
+{
+  if (!std::isfinite(scale))
+    return 1.0f;
+  return std::clamp(scale, min_edit_scale(), max_edit_scale());
+}
+
+float WMOInstance::scaleFromModf(uint16_t raw)
+{
+  return raw == 0 ? 1.0f : static_cast<float>(raw) / 1024.0f;
+}
+
+uint16_t WMOInstance::scaleToModf(float scale)
+{
+  if (!std::isfinite(scale))
+    return 1024;
+  return static_cast<uint16_t>(std::clamp(std::lround(scale * 1024.0f), 1L, 65535L));
+}
+
+float WMOInstance::sanitizeScale(float scale)
+{
+  if (!std::isfinite(scale) || scale <= 0.0f)
+    return 1.0f;
+  return std::clamp(scale, SceneObject::min_scale(), SceneObject::max_scale());
+}
 
 WMOInstance::WMOInstance(BlizzardArchive::Listfile::FileKey const& file_key, ENTRY_MODF const* d, Noggit::NoggitRenderContext context)
   : SceneObject(SceneObjectTypes::eWMO, context)
@@ -32,12 +67,9 @@ WMOInstance::WMOInstance(BlizzardArchive::Listfile::FileKey const& file_key, ENT
 
   uid = d->uniqueID;
 
-  // Per-instance WMO scaling (MODF.scale) is a Legion (7.0)+ client feature. NO pre-Legion
-  // client -- 1.12/Turtle OR 3.3.5 -- reads this field; they always render WMOs at native
-  // model size. Applying it in the editor only produced an editor-vs-game size mismatch, so
-  // WMO scale is deliberately ignored on load: every WMO displays at its true in-game size.
-  scale = 1.0f;
-  (void)d->scale;
+  // EVERWOOD: keep the stored WMO scale (the Everwood client and vmap extractor honour it).
+  // Stock tiles store 0, which means 1.0. Kept in every project so a save never drops it.
+  scale = scaleFromModf(d->scale);
 
   extents[0] = d->extents[0];
   extents[1] = d->extents[1];
@@ -58,7 +90,7 @@ WMOInstance::WMOInstance(BlizzardArchive::Listfile::FileKey const& file_key, Nog
   pos = glm::vec3(0.0f, 0.0f, 0.0f);
   dir = math::degrees::vec3(math::degrees(0)._, math::degrees(0)._, math::degrees(0)._);
   uid = 0;
-  scale = 1.0f; // WMO scale unsupported pre-Legion; never scale a newly placed WMO
+  scale = 1.0f; // a newly placed WMO starts unscaled
   _context = context;
 
   _need_recalc_extents = true;
@@ -264,7 +296,9 @@ void WMOInstance::intersect (math::ray const& ray, selection_result* results, bo
 
   for (auto&& result : wmo->intersect(subray, do_exterior, do_interior, first_occurence))
   {
-    results->emplace_back (result, this);
+    // EVERWOOD: the sub-ray is normalised in model space, so the hit distance needs the scale back
+    // (ModelInstance does the same).
+    results->emplace_back (result * scale, this);
   }
 }
 
@@ -322,6 +356,7 @@ void WMOInstance::updateDetails(Noggit::Ui::detail_infos* detail_widget)
     << "<br><b>unique ID: </b>" << uid
     << "<br><b>position X/Y/Z: </b>{" << pos.x << ", " << pos.y << ", " << pos.z << "}"
     << "<br><b>rotation X/Y/Z: </b>{" << dir.x << ", " << dir.y << ", " << dir.z << "}"
+    << "<br><b>scale: </b>" << scale
     << "<br><b>WMO Id: </b>" << wmo->WmoId
     << "<br><b>doodad set: </b>" << doodadset()
     << "<br><b>name set: </b>" << mNameset

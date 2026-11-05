@@ -155,7 +155,7 @@ public:
   };
 
   void snap_selected_models_to_the_ground();
-  void scale_selected_models(float v, object_scaling_type type);
+  void scale_selected_models(float v, object_scaling_type type, bool include_wmos = true);
   void move_selected_models(float dx, float dy, float dz);
   void move_model(selection_type entry, float dx, float dy, float dz);
   void move_selected_models(glm::vec3 const& delta);

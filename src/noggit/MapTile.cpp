@@ -899,9 +899,9 @@ void MapTile::save(World* world, bool save_using_mclq_liquids)
     lMODF_Data[lID].flags = object->mFlags;
     lMODF_Data[lID].doodadSet = object->doodadset();
     lMODF_Data[lID].nameSet = object->mNameset;
-    // Always write native scale (1024 == 1.0). Pre-Legion clients ignore MODF.scale, and Noggit
-    // no longer scales WMOs, so this also normalises any previously-scaled WMOs on the next save.
-    lMODF_Data[lID].scale = 1024;
+    // EVERWOOD: write the instance scale (1024 == 1.0, which is what an unscaled WMO gets, as before).
+    // The extents above are the box of the scaled model.
+    lMODF_Data[lID].scale = WMOInstance::scaleToModf(object->scale);
     lID++;
   }
 

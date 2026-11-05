@@ -1139,6 +1139,11 @@ bool WMOGroup::is_visible( glm::mat4x4 const& transform
     // adjusted group transform mat = 
     glm::vec3 pos = transform *  glm::vec4(center, 1.0f);
 
+  // EVERWOOD: a scaled WMO (uniform scale in the transform) has a scaled bounding sphere
+  float const instance_scale = glm::length(glm::vec3(transform[0]));
+  bool const scaled = std::abs(instance_scale - 1.0f) > 1e-4f;
+  float const rad = scaled ? this->rad * instance_scale : this->rad;
+
   float dist = display == display_mode::in_3D
     ? glm::distance(pos, camera) - rad
     : std::abs(pos.y - camera.y) - rad;
@@ -1153,7 +1158,8 @@ bool WMOGroup::is_visible( glm::mat4x4 const& transform
       return false;
 
 
-  if (!frustum.intersects(pos + BoundingBoxMin, pos + BoundingBoxMax))
+  // EVERWOOD: this box test is unscaled; for a scaled WMO the sphere test above is enough
+  if (!scaled && !frustum.intersects(pos + BoundingBoxMin, pos + BoundingBoxMax))
   {
     return false;
   }

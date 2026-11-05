@@ -817,7 +817,7 @@ void World::snap_selected_models_to_the_ground()
   update_selected_model_groups();
 }
 
-void World::scale_selected_models(float v, object_scaling_type type)
+void World::scale_selected_models(float v, object_scaling_type type, bool include_wmos)
 {
   ZoneScoped;
   if (!_selected_model_count)
@@ -833,9 +833,30 @@ void World::scale_selected_models(float v, object_scaling_type type)
 
       if (obj->which() != eMODEL)
       {
-        // WMOs are never scaled: MODF.scale is a Legion+ field ignored by every client Noggit
-        // targets (1.12/Turtle and 3.3.5), so scaling one would only mislead in the editor.
-        continue;
+        // EVERWOOD: WMOs scale only in an Everwood Mode project (uniform, 0.1 to 20).
+        if (!include_wmos || !WMOInstance::scaleEditable())
+          continue;
+
+        NOGGIT_CUR_ACTION->registerObjectTransformed(obj);
+
+        float wmo_scale = obj->scale;
+
+        switch (type)
+        {
+        case World::object_scaling_type::set:  wmo_scale = v; break;
+        case World::object_scaling_type::add:  wmo_scale += v; break;
+        case World::object_scaling_type::mult: wmo_scale *= v; break;
+        }
+
+        wmo_scale = WMOInstance::clampEditScale(wmo_scale);
+
+        if (std::abs(wmo_scale - obj->scale) < ModelInstance::min_scale())
+          continue;
+
+        updateTilesEntry(entry, model_update::remove);
+        obj->scale = wmo_scale;
+        obj->recalcExtents();
+        updateTilesEntry(entry, model_update::add);
       }
       else
       {
@@ -2539,8 +2560,8 @@ WMOInstance* World::addWMOAndGetInstance ( BlizzardArchive::Listfile::FileKey co
   wmo_instance.uid = mapIndex.newGUID();
   wmo_instance.pos = newPos;
   wmo_instance.dir = rotation;
-  wmo_instance.scale = 1.0f; // WMO scale unsupported pre-Legion; ignore any requested scale
-  (void)scale;
+  // EVERWOOD: keep the requested scale (undo of a delete, paste, replace); a new placement passes 1.0.
+  wmo_instance.scale = WMOInstance::sanitizeScale(scale);
 
   // to ensure the tiles are updated correctly
   wmo_instance.wmo->wait_until_loaded();

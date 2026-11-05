@@ -10,6 +10,7 @@
 #include <noggit/ui/tools/NodeEditor/Nodes/DataTypes/GenericData.hpp>
 #include <noggit/ui/tools/NodeEditor/Nodes/Scene/NodesContext.hpp>
 #include <noggit/World.h>
+#include <noggit/WMOInstance.h>
 
 #include <external/NodeEditor/include/nodes/Node>
 
@@ -67,7 +68,8 @@ void AddObjectInstanceNode::compute()
   }
   else if (QString(path.c_str()).endsWith(".wmo", Qt::CaseInsensitive))
   {
-    obj = world->addWMOAndGetInstance(path, {pos.x, pos.y, pos.z}, {math::degrees(dir.x)._, math::degrees(dir.y)._, math::degrees(dir.z)._ }, scale, false);
+    obj = world->addWMOAndGetInstance(path, {pos.x, pos.y, pos.z}, {math::degrees(dir.x)._, math::degrees(dir.y)._, math::degrees(dir.z)._ }
+                                   , WMOInstance::scaleEditable() ? WMOInstance::clampEditScale(scale) : 1.0f, false); // EVERWOOD
   }
   else
   {

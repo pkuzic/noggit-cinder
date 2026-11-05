@@ -149,6 +149,19 @@ goes to `settings/` next to the script, and results go to `<script>_result.txt`.
 `creation_dialog_shot <png>`, `paint_tool <texture> <radius> <pressure> <hardness>`, `everwood_tool`, `shift 0|1`,
 `cursor [0|1]`, `overlay shadows|mccv|lines 0|1`, `tint x y radius r g b`, `action_undo`, `action_redo`.
 
+## WMO scale
+
+The last u16 of a MODF entry (+0x3E) is the WMO's uniform scale, 1024 = 1.0. Stock tiles store 0, which also
+means 1.0. The Everwood game client and the server's vmap extractor honour it.
+
+- **Every project, Everwood or not:** a stored scale is read, drawn, picked and written back, so opening and saving
+  a tile never changes a scaled WMO. An unscaled WMO is written as 1024, exactly as before. The MODF extents are
+  the box of the scaled model.
+- **Everwood Mode only:** the scale can be edited with the object editor's scale field, the mouse and keyboard
+  scale shortcuts, the gizmo (Scale), multi-select, the node editor and scripts. The range is 0.1 to 20, stored
+  as round(scale x 1024), uniform only. Undo and redo cover it. Outside Everwood Mode these controls leave a
+  WMO's scale alone. Random size on paste never scales WMOs.
+
 ## Credits
 
 The voxel field, the terrain seed and the brushes are ported from the Everwood game client's open crates
@@ -168,3 +181,13 @@ Fairbanks (Apache-2.0 / MIT).
 Включается галочкой **Everwood Mode** при создании проекта или в **Noggit > Project Settings...**; вступает в силу при
 следующем открытии карты. Инструменты: лепка (копать, насыпать, сглаживать, вдавить, выдавить), выравнивание, мост и
 тоннель. Кнопка **Export voxel edits** пишет файл для будущего импорта на сервер; форматы описаны выше.
+
+## Масштаб WMO
+
+Последний u16 записи MODF (+0x3E) задаёт равномерный масштаб WMO, 1024 = 1.0; в обычных тайлах там 0, это тоже 1.0.
+Клиент Everwood и vmap-экстрактор сервера его учитывают. В любом проекте сохранённый масштаб читается, рисуется и
+записывается обратно, так что открытие и сохранение тайла не меняет масштабированный WMO; WMO без масштаба
+пишется как 1024, как и раньше; границы MODF считаются по масштабированной модели. Менять масштаб можно только
+в Everwood Mode: поле масштаба, мышь и клавиши, гизмо, мультивыделение, редактор нод и скрипты; диапазон от 0.1 до 20,
+хранится round(масштаб x 1024), только равномерный; undo и redo работают. Вне Everwood Mode эти элементы масштаб WMO
+не трогают.

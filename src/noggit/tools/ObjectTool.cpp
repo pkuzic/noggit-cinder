@@ -695,7 +695,7 @@ namespace Noggit
                                 float min = _object_paste_params.minScale;
                                 float max = _object_paste_params.maxScale;
 
-                                world->scale_selected_models(misc::randfloat(min, max), World::object_scaling_type::set);
+                                world->scale_selected_models(misc::randfloat(min, max), World::object_scaling_type::set, false); // EVERWOOD: random size never scales WMOs
                             }
                         }
                     }

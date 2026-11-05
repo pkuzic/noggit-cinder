@@ -16,6 +16,16 @@ struct ENTRY_MODF;
 class WMOInstance : public SceneObject
 {
 public:
+  // EVERWOOD: WMO scale (MODF +0x3E, uint16, 1024 = 1.0). Editing it exists only in an Everwood Mode
+  // project; load and save keep an existing scale in every project.
+  static bool scaleEditable();
+  static constexpr float min_edit_scale() { return 0.1f; }
+  static constexpr float max_edit_scale() { return 20.f; }
+  static float clampEditScale(float scale);
+  static float scaleFromModf(uint16_t raw); // 0 and 1024 are both exactly 1.0
+  static uint16_t scaleToModf(float scale); // round(scale * 1024)
+  static float sanitizeScale(float scale);  // finite, representable; no edit range
+
   scoped_wmo_reference wmo;
 
   uint16_t mFlags;

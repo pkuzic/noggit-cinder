@@ -9,6 +9,7 @@
 #include <noggit/MapView.h>
 #include <noggit/ModelInstance.h>
 #include <noggit/Selection.h>
+#include <noggit/WMOInstance.h>
 #include <noggit/World.h>
 
 #include <QtWidgets/QDoubleSpinBox>
@@ -267,9 +268,8 @@ namespace Noggit
 
           auto obj = std::get<selected_object_type>(selection);
 
-          // WMO scale is not editable: pre-Legion clients ignore MODF.scale, so the field is
-          // disabled (and always reads 1.00) for WMOs and only active for M2 models.
-          _scale->setEnabled(obj->which() != eWMO);
+          // EVERWOOD: a WMO's scale is editable only in an Everwood Mode project.
+          _scale->setEnabled(obj->which() != eWMO || WMOInstance::scaleEditable());
 
           _position_x->setValue(obj->pos.x);
           _position_y->setValue(obj->pos.y);

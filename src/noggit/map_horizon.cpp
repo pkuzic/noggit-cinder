@@ -888,8 +888,9 @@ bool map_horizon::wmoHasLowRes(WMOInstance* instance)
         lowres_wmo.rot[0])._, math::degrees(lowres_wmo.rot[1])._, math::degrees(lowres_wmo.rot[2])._ };
 
       if (misc::vec3d_equals(glm::vec3(lowres_wmo.pos[0], lowres_wmo.pos[1], lowres_wmo.pos[2]), instance->pos)
-        && misc::deg_vec3d_equals(dir, instance->dir)
-        && misc::float_equals( (lowres_wmo.scale / 1024.0f), instance->scale))
+        && misc::deg_vec3d_equals(dir, instance->dir))
+        // EVERWOOD: the scale is not compared; a scaled WMO may sit beside an unscaled WDL entry,
+        // which is brought up to date when the instance is next recalculated
       {
         // instance->lowResWmo = scoped_wmo_reference(low_res_model, instance->wmo->_context);
         instance->lowResInstance = &lowres_wmo;

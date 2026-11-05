@@ -7,6 +7,7 @@
 #include <noggit/ui/tools/NodeEditor/Nodes/Scene/NodesContext.hpp>
 #include <noggit/ActionManager.hpp>
 #include <noggit/Action.hpp>
+#include <noggit/WMOInstance.h>
 #include <noggit/application/NoggitApplication.hpp>
 
 #include <external/NodeEditor/include/nodes/Node>
@@ -45,14 +46,10 @@ void ObjectInstanceSetScaleNode::compute()
 
   if (obj->which() == eWMO)
   {
-      bool modern_features = Noggit::Application::NoggitApplication::instance()->getConfiguration()->modern_features;
-      if (modern_features)
+      // EVERWOOD: only in an Everwood Mode project; elsewhere the WMO keeps its scale
+      if (WMOInstance::scaleEditable())
       {
-        obj->scale = scale;
-      }
-      else
-      {
-        obj->scale = 1.0;
+        obj->scale = WMOInstance::clampEditScale(scale);
       }
   }
   else {

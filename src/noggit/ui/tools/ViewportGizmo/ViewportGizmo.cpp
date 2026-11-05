@@ -175,10 +175,9 @@ void ViewportGizmo::handleTransformGizmo(MapView* map_view
       math::degrees::vec3& rotation = obj_instance->dir;
       float& scale = obj_instance->scale;
 
-      // If modern features are disabled, we don't want to scale WMOs
-      if (obj_instance->which() == eWMO && !modern_features && _gizmo_operation == ImGuizmo::SCALE)
+      // EVERWOOD: WMOs scale only in an Everwood Mode project; elsewhere skip them and keep their scale
+      if (obj_instance->which() == eWMO && _gizmo_operation == ImGuizmo::SCALE && !WMOInstance::scaleEditable())
       {
-          scale = 1.0f;
           continue;
       }
 
@@ -266,6 +265,7 @@ void ViewportGizmo::handleTransformGizmo(MapView* map_view
         case ImGuizmo::SCALE:
         {
           scale = std::max(0.001f, scale * (new_scale.x / _last_pivot_scale));
+          if (obj_instance->which() == eWMO) scale = WMOInstance::clampEditScale(scale); // EVERWOOD
           break;
         }
         case ImGuizmo::BOUNDS:
@@ -297,10 +297,9 @@ void ViewportGizmo::handleTransformGizmo(MapView* map_view
       math::degrees::vec3& rotation = obj_instance->dir;
       float& scale = obj_instance->scale;
 
-      // If modern features are disabled, we don't want to scale WMOs
-      if (obj_instance->which() == eWMO && !modern_features && _gizmo_operation == ImGuizmo::SCALE)
+      // EVERWOOD: WMOs scale only in an Everwood Mode project; elsewhere skip them and keep their scale
+      if (obj_instance->which() == eWMO && _gizmo_operation == ImGuizmo::SCALE && !WMOInstance::scaleEditable())
       {
-          scale = 1.0f;
           continue;
       }
 
@@ -324,6 +323,7 @@ void ViewportGizmo::handleTransformGizmo(MapView* map_view
         case ImGuizmo::SCALE:
         {
           scale = std::max(0.001f, new_scale.x);
+          if (obj_instance->which() == eWMO) scale = WMOInstance::clampEditScale(scale); // EVERWOOD
           break;
         }
         case ImGuizmo::BOUNDS:

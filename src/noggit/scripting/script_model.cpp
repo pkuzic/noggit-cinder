@@ -55,6 +55,13 @@ namespace Noggit
 
     void model::set_scale(float scale)
     {
+        // EVERWOOD: a WMO scales only in an Everwood Mode project, within 0.1 to 20
+        if (_object->which() == eWMO)
+        {
+          if (!WMOInstance::scaleEditable())
+            return;
+          scale = WMOInstance::clampEditScale(scale);
+        }
         world()->updateTilesEntry(_object, model_update::remove);
         _object->scale = scale;
         _object->recalcExtents();

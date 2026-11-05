@@ -2,7 +2,9 @@
 
 #include <noggit/everwood/EverwoodSmoke.hpp>
 
+#include <noggit/Action.hpp>
 #include <noggit/ActionManager.hpp>
+#include <noggit/WMOInstance.h>
 #include <noggit/everwood/EverwoodLayer.hpp>
 #include <noggit/everwood/VoxelField.hpp>
 #include <noggit/tools/EverwoodTool.hpp>
@@ -258,6 +260,15 @@ namespace Noggit::Everwood
         OpenGL::context::scoped_setter const _(::gl, _view->context());
         world->mapIndex.saveTile(tile, world);
         report("saved tile");
+      }
+      else if (cmd == "save_changed")
+      {
+        // what Save does: every tile that was changed, so an object spanning tiles is saved in all of them
+        World* world = _view->getWorld();
+        _view->makeCurrent();
+        OpenGL::context::scoped_setter const _(::gl, _view->context());
+        world->mapIndex.saveChanged(world);
+        report("saved changed tiles");
       }
       else if (cmd == "report")
       {
@@ -633,6 +644,93 @@ namespace Noggit::Everwood
         bool const on = a.value(1).toInt() != 0;
         _view->_draw_wmo.set(on);
         _view->_draw_models.set(on);
+      }
+      else if (cmd == "wmo_list")
+      {
+        // wmo_list [filter]: every loaded WMO instance whose path contains the filter
+        QString const filter = a.value(1).toLower();
+        _view->getWorld()->getModelInstanceStorage().for_each_wmo_instance([&](WMOInstance& wmo)
+        {
+          std::string const path = wmo.wmo->file_key().filepath();
+          if (!filter.isEmpty() && !QString::fromStdString(path).toLower().contains(filter))
+            return;
+          auto const& e = wmo.getExtents();
+          glm::vec3 const w = Noggit::Everwood::noggitToWow(wmo.pos);
+          report("wmo uid " + std::to_string(wmo.uid) + " " + path + " wow " + std::to_string(w.x) + " " + std::to_string(w.y) + " " + std::to_string(w.z)
+                 + " scale " + std::to_string(wmo.scale) + " raw " + std::to_string(WMOInstance::scaleToModf(wmo.scale))
+                 + " extents " + std::to_string(e[0].x) + " " + std::to_string(e[0].y) + " " + std::to_string(e[0].z) + " "
+                 + std::to_string(e[1].x) + " " + std::to_string(e[1].y) + " " + std::to_string(e[1].z));
+        });
+      }
+      else if (cmd == "wmo_place")
+      {
+        // wmo_place <path> <wow x> <wow y> <wow z> <yaw>: add a WMO, as paste does
+        glm::vec3 const p = Noggit::Everwood::wowToNoggit(glm::vec3(f(2), f(3), f(4)));
+        _view->makeCurrent();
+        OpenGL::context::scoped_setter const _(::gl, _view->context());
+        auto* wmo = _view->getWorld()->addWMOAndGetInstance(a.value(1).toStdString(), p, math::degrees::vec3(0.f, f(5), 0.f), 1.0f, false);
+        wmo->wmo->wait_until_loaded();
+        wmo->wmo->waitForChildrenLoaded();
+        wmo->recalcExtents();
+        report("placed wmo uid " + std::to_string(wmo->uid));
+      }
+      else if (cmd == "wmo_select")
+      {
+        World* world = _view->getWorld();
+        // wmo_select <uid> [<uid> ...]: select these instances (several = multi-select)
+        world->reset_selection();
+        for (int i = 1; i < a.size(); ++i)
+        {
+          auto entry = world->get_model(a.value(i).toUInt());
+          expect(entry.has_value(), "wmo " + a.value(i).toStdString() + " found");
+          if (entry)
+            world->add_to_selection(entry.value());
+        }
+      }
+      else if (cmd == "wmo_scale")
+      {
+        // wmo_scale set|add|mult <v>: what the object editor's scale field and the mouse shortcut call
+        World* world = _view->getWorld();
+        _view->makeCurrent();
+        OpenGL::context::scoped_setter const _(::gl, _view->context());
+        NOGGIT_ACTION_MGR->beginAction(_view, Noggit::ActionFlags::eOBJECTS_TRANSFORMED);
+        auto const type = a.value(1) == "add" ? World::object_scaling_type::add
+                        : a.value(1) == "mult" ? World::object_scaling_type::mult : World::object_scaling_type::set;
+        world->scale_selected_models(f(2), type);
+        NOGGIT_ACTION_MGR->endAction();
+      }
+      else if (cmd == "wmo_delete")
+      {
+        // delete the selection as the Delete key does, as one undoable action
+        _view->makeCurrent();
+        OpenGL::context::scoped_setter const _(::gl, _view->context());
+        NOGGIT_ACTION_MGR->beginAction(_view, Noggit::ActionFlags::eOBJECTS_REMOVED);
+        _view->getWorld()->delete_selected_models();
+        NOGGIT_ACTION_MGR->endAction();
+      }
+      else if (cmd == "wmo_expect_scale")
+      {
+        // wmo_expect_scale <uid> <scale>
+        auto* obj = _view->getWorld()->getObjectInstance(a.value(1).toUInt());
+        expect(obj && std::abs(obj->scale - f(2)) < 1e-4f, "wmo " + a.value(1).toStdString() + " scale "
+               + (obj ? std::to_string(obj->scale) : std::string("missing")) + " vs " + a.value(2).toStdString());
+      }
+      else if (cmd == "wmo_look")
+      {
+        // wmo_look <uid> <distance> <height>: camera in front of the WMO, looking at its centre
+        auto* obj = _view->getWorld()->getObjectInstance(a.value(1).toUInt());
+        if (!obj)
+        {
+          expect(false, "wmo_look: no such uid");
+          return true;
+        }
+        auto const& e = obj->getExtents();
+        glm::vec3 const c = (e[0] + e[1]) * 0.5f;
+        float const dist = f(2), height = f(3);
+        _view->_camera.position = glm::vec3(c.x, c.y + height, c.z - dist);
+        _view->_camera.yaw(math::degrees(0.f));
+        _view->_camera.pitch(math::degrees(std::atan2(height, dist) * 57.29578f));
+        _view->_camera_moved_since_last_draw = true;
       }
       else if (cmd == "panel_shot")
       {
