@@ -1,12 +1,13 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 //
 // The Everwood voxel field: the same density maths as the game client (benilla-voxel world.rs,
-// CONTRACT v3, v3.3 soft brushes, v3.6 shapes) so an edit made here lands on exactly the same samples.
+// CONTRACT v3, v3.3 soft brushes, v3.6 shapes, v3.9 dither + level) so an edit made here lands on
+// exactly the same samples.
 // Ported from the server replica MonkeyVoxelField, which itself names its Rust originals; the Rust
 // sources are Apache-2.0 / MIT, see EVERWOOD-MODE.md.
 //
 // Pure C++ with no Noggit, Qt or OpenGL headers: the standalone golden-vector test compiles this very
-// file (voxel-core/golden-v3.6.txt).
+// file (voxel-core/golden-v3.9.txt).
 //
 // Determinism: every op is float (never double), x*x for powi(2), std::sqrt on float, std::round (half
 // away from zero == Rust f32::round), clamp, cast. MSVC x64 /fp:precise uses SSE2 and contracts no FMA.
@@ -77,8 +78,17 @@ namespace Noggit::Everwood::Voxel
   constexpr uint8_t MODE_BUILD = 1;
   constexpr uint8_t MODE_SMOOTH = 2;
   constexpr uint8_t MODE_FLATTEN = 3;
-  constexpr uint8_t MODE_MAX = 5;
+  // CONTRACT v3.9: 6 = level with a soft bank (param: i12 plane offset cm, bits 12-13 bank slope, bits
+  // 14-15 core size), see world.rs MODE_LEVEL / LevelBrush. Applied like 0-3.
+  constexpr uint8_t MODE_LEVEL = 6;
+  constexpr uint8_t MODE_MAX = 6;
   constexpr uint16_t SOFT_FLAG = 0x8000;
+  // CONTRACT v3.9: soft param bits 11-14 = rounding field; 0x4000 = dithered rounding.
+  constexpr uint16_t ROUND_MASK = 0x7800;
+  constexpr uint16_t ROUND_DITHER = 0x4000;
+  uint32_t Mix32(uint32_t h);
+  float DitherThreshold(uint32_t seed, int32_t x, int32_t y, int32_t z);
+  int8_t DitherRound(float v, float u);
 
   constexpr uint8_t FALLOFF_SMOOTH = 0;
   constexpr uint8_t FALLOFF_LINEAR = 1;
@@ -117,8 +127,10 @@ namespace Noggit::Everwood::Voxel
     uint16_t param = 0;
 
     bool IsValid() const;
-    bool IsApplied() const { return mode <= MODE_FLATTEN; }
+    bool IsApplied() const { return mode <= MODE_FLATTEN || mode == MODE_LEVEL; }
     bool Soft(SoftBrush& b) const { return mode <= MODE_SMOOTH && SoftBrush::FromParam(param, b); }
+    bool Dithered() const { SoftBrush b; return Soft(b) && (param & ROUND_MASK) == ROUND_DITHER; }   // v3.9
+    uint32_t DitherSeed() const;                // v3.9 world.rs dither_seed
     uint8_t Shape() const { return mode <= MODE_BUILD ? ShapeOfParam(param) : SHAPE_SPHERE; }
     // Smooth and every soft edit read samples they do not write (the canonical rebuild closure rule).
     bool ReadsNeighbours() const { SoftBrush b; return mode == MODE_SMOOTH || (mode <= MODE_BUILD && Soft(b)); }

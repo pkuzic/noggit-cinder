@@ -1,6 +1,6 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 //
-// Golden-vector check of the voxel field against the game client's output, voxel-core/golden-v3.6.txt
+// Golden-vector check of the voxel field against the game client's output, voxel-core/golden-v3.9.txt (or v3.6)
 // (written by benilla-voxel tests/golden_v3.rs). Same synthetic height function, same edit list (read back
 // from the file by bit pattern), same activation; every chunk's density + mesh FNV, the down-ray height
 // hash, the density hash and the closure rule must match. Runs in the standalone test exe and, through

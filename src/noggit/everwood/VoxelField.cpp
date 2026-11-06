@@ -68,6 +68,51 @@ namespace Noggit::Everwood::Voxel
         }
     }
 
+    // CONTRACT v3.9: world.rs mix32 / dither_seed / dither_threshold / dither_round (integer hash, exact
+    // f32 threshold, floor + exact fraction compare).
+    uint32_t Mix32(uint32_t h)
+    {
+        h ^= h >> 16;
+        h *= 0x7feb352du;
+        h ^= h >> 15;
+        h *= 0x846ca68bu;
+        h ^= h >> 16;
+        return h;
+    }
+
+    static uint32_t floatBits(float f)
+    {
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        return u;
+    }
+
+    uint32_t Edit::DitherSeed() const
+    {
+        uint32_t s = Mix32(floatBits(pos[0]));
+        s = Mix32(s ^ floatBits(pos[1]));
+        s = Mix32(s ^ floatBits(pos[2]));
+        s = Mix32(s ^ floatBits(radius));
+        return Mix32(s ^ ((uint32_t(strength) << 16) | uint32_t(mode)));
+    }
+
+    float DitherThreshold(uint32_t seed, int32_t x, int32_t y, int32_t z)
+    {
+        uint32_t const p = (uint32_t(x) * 0x9e3779b1u) ^ (uint32_t(y) * 0x85ebca77u) ^ (uint32_t(z) * 0xc2b2ae3du);
+        uint32_t const h = Mix32(seed ^ Mix32(p));
+        return float(h >> 8) / 16777216.0f;
+    }
+
+    int8_t DitherRound(float v, float u)
+    {
+        float const fl = std::floor(v);
+        float const fr = v - fl;
+        float q = fr > u ? fl + 1.0f : fl;
+        if (q < -128.0f) q = -128.0f;
+        if (q > 127.0f) q = 127.0f;
+        return int8_t(q);
+    }
+
     uint16_t SoftParam(uint8_t falloff, uint8_t hardness)
     {
         return uint16_t(SOFT_FLAG | std::min<uint8_t>(falloff, 2) | (uint16_t(std::min<uint8_t>(hardness, 100)) << 2));
@@ -388,10 +433,70 @@ namespace Noggit::Everwood::Voxel
             return changed;
         }
 
+        if (e.mode == MODE_LEVEL)
+        {
+            // CONTRACT v3.9: world.rs MODE_LEVEL, level with a soft bank. Per-sample, same op order.
+            static float const SLOPES[4] = { 1.0f, 0.57735026f, 1.7320508f, 0.0f };
+            static uint8_t const CORES[4] = { 50, 25, 75, 0 };
+            int32_t off = int32_t(e.param & 0x0fff);
+            if (off >= 2048)
+                off -= 4096;
+            float const zp = (e.pos[2] + float(off) / 100.0f) / VOXEL_SIZE;
+            float const kSlope = SLOPES[(e.param >> 12) & 0x3];
+            SoftBrush b;
+            b.falloff = FALLOFF_SMOOTH;
+            b.hardness = CORES[(e.param >> 14) & 0x3];
+            float const inner = r * (float(b.hardness) / 100.0f);
+            float const s = float(e.strength) / 255.0f;
+            for (Key const& k : ChunksOfBox(lo, hi))
+            {
+                auto it = set.find(k);
+                if (it == set.end())
+                    continue;
+                Density& d = it->second;
+                int32_t const base[3] = { k[0] * C, k[1] * C, k[2] * C };
+                bool any = false;
+                for (int32_t z = std::max(lo[2], base[2]); z <= std::min(hi[2], base[2] + C - 1); ++z)
+                {
+                    float const dzp = float(z) - zp;
+                    for (int32_t y = std::max(lo[1], base[1]); y <= std::min(hi[1], base[1] + C - 1); ++y)
+                        for (int32_t x = std::max(lo[0], base[0]); x <= std::min(hi[0], base[0] + C - 1); ++x)
+                        {
+                            float const dx = float(x) - c[0], dy = float(y) - c[1];
+                            float const rho = std::sqrt(dx * dx + dy * dy);
+                            if (rho >= r)
+                                continue;
+                            float const f = b.Weight(rho, r);
+                            if (f <= 0.0f)
+                                continue;
+                            float const g = rho > inner ? (rho - inner) * kSlope : 0.0f;
+                            float const tlo = (dzp - g) * DENSITY_SCALE;
+                            float const thi = (dzp + g) * DENSITY_SCALE;
+                            size_t const idx = owned_index(x - base[0], y - base[1], z - base[2]);
+                            float const old = float(d[idx]);
+                            float t = old < tlo ? tlo : (old > thi ? thi : old);
+                            if (t < -128.0f) t = -128.0f;
+                            if (t > 127.0f) t = 127.0f;
+                            int8_t const q = quantRaw(old + (t - old) * (s * f));
+                            if (q != d[idx])
+                            {
+                                d[idx] = q;
+                                any = true;
+                            }
+                        }
+                }
+                if (any)
+                    changed.push_back(k);
+            }
+            return changed;
+        }
+
         // Smooth (hard or soft) + v3.3 soft lower / raise: Jacobi over the pre-edit gather (brush box + one
         // read ring), across chunk borders.
         float const strength = float(e.strength) / 255.0f;
         int32_t const shiftDz = isSoft ? (e.mode == 0 ? 1 : (e.mode == 1 ? -1 : 0)) : 0;
+        bool const dithered = e.Dithered();          // CONTRACT v3.9
+        uint32_t const ditherSeed = dithered ? e.DitherSeed() : 0;
         Key const glo{ lo[0] - 1, lo[1] - 1, lo[2] - 1 }, ghi{ hi[0] + 1, hi[1] + 1, hi[2] + 1 };
         size_t const dim[3] = { size_t(ghi[0] - glo[0] + 1), size_t(ghi[1] - glo[1] + 1), size_t(ghi[2] - glo[2] + 1) };
         auto at = [&](int32_t x, int32_t y, int32_t z) -> size_t
@@ -450,7 +555,8 @@ namespace Noggit::Everwood::Voxel
                             + float(grid[gi + sz]) + float(grid[gi - sz])) / 6.0f;
                         nv = isSoft ? old + (avg - old) * a : old * (1.0f - strength) + avg * strength;
                     }
-                    int8_t const nw = quantRaw(nv);
+                    // CONTRACT v3.9: a dithered soft edit rounds with the per-sample threshold
+                    int8_t const nw = dithered ? DitherRound(nv, DitherThreshold(ditherSeed, x, y, z)) : quantRaw(nv);
                     int32_t const lx = x - k[0] * C, ly = y - k[1] * C, lz = z - k[2] * C;
                     if (lx < 0 || lx >= C || ly < 0 || ly >= C || lz < 0 || lz >= C)
                     {

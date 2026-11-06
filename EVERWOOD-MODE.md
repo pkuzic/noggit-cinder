@@ -133,7 +133,8 @@ The same `edits` array, plus what a server import needs to decide whether it may
 ## Tests
 
 `src/noggit/everwood/VoxelGolden.cpp` checks the field against the game client's golden vectors
-(`golden-v3.6.txt`, from `benilla-voxel/tests/golden_v3.rs`).
+(`golden-v3.9.txt` — CONTRACT v3.9 dithered soft rounding + mode 6 level with a soft bank — and the older
+`golden-v3.6.txt`, from `benilla-voxel/tests/golden_v3.rs`).
 
 Setting the environment variable `NOGGIT_EVERWOOD_SMOKE=<script file>` makes Noggit run a test script instead of
 showing the project selection window. Unset, the hook does nothing. While it is set, every default `QSettings`
