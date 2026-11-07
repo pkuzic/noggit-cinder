@@ -141,8 +141,8 @@ vec4 blend_tri(vec2 top_uv, vec3 n)
   vec4 c = vec4(0.0);
   float sum = 0.0;
   if (w.y > 0.0005) { c += blend(top_uv) * w.y; sum += w.y; }
-  if (w.x > 0.0005) { c += blend(vary_position.zy / UNITSIZE) * w.x; sum += w.x; }
-  if (w.z > 0.0005) { c += blend(vary_position.xy / UNITSIZE) * w.z; sum += w.z; }
+  if (w.x > 0.0005) { c += blend(vary_position.xy / UNITSIZE) * w.x; sum += w.x; }
+  if (w.z > 0.0005) { c += blend(vary_position.zy / UNITSIZE) * w.z; sum += w.z; }
   return c / max(sum, 1e-4);
 }
 
@@ -170,19 +170,39 @@ void main()
 
   vec4 ground = blend_tri(vary_uv, normalized_normal);
   float wall = clamp(vary_wall, 0.0, 1.0);
-  if (wall > 0.0)
+  if (wall > 0.0 && vary_layers.x >= 0.0)
   {
-    // Planar on the side that faces the wall: the ground's mapping would stretch to streaks here, and the
-    // ground's own colours read as earth once they are darkened and warmed.
+    // Everwood (mapper report 3.43, as the game's monkey_voxel.wgsl): an edited wall wears the chunk's most
+    // rock / dirt-like layer (the least saturated one, sampled at one fixed spot so the pick is the same
+    // over the whole triangle) in a sharp triplanar (|n|^6) at ground texel density. The old flat "earth"
+    // colour plus a sky-blue ambient lift read as a pale white wall.
+    float wl = vary_layers.x;
+    float best = 1e9;
+    for (int i = 0; i < 4; ++i)
+    {
+      float id = vary_layers[i];
+      if (id < 0.0)
+        continue;
+      vec3 c = layer_color(vec2(0.37, 0.61), id).rgb;
+      float sat = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+      if (sat < best)
+      {
+        best = sat;
+        wl = id;
+      }
+    }
     vec3 n = abs(normalized_normal);
-    // n.x is along WoW x, which is Noggit's z.
-    vec2 side = (n.z > n.x ? vary_position.zy : vary_position.xy) / UNITSIZE;
-    vec4 rock = blend(side);
-    float luminance = dot(rock.rgb, vec3(0.299, 0.587, 0.114));
-    vec3 earth = vec3(0.70, 0.56, 0.42) * (0.55 + 1.0 * luminance);
-    ground = mix(ground, vec4(earth, 0.0), wall);
-    // A wall rarely faces the sun: without this every pit reads as a black hole.
-    currColor += AmbientColor_FogEnd.xyz * 0.45 * wall;
+    vec3 w = pow(n, vec3(6.0));
+    w /= (w.x + w.y + w.z);
+    // n.x is along WoW x, which is Noggit's z; n.y is up (tops and undersides).
+    vec4 rock = layer_color(vary_position.xy / UNITSIZE, wl) * w.x
+              + layer_color(vary_position.zy / UNITSIZE, wl) * w.z
+              + layer_color(vary_position.xz / UNITSIZE, wl) * w.y;
+    rock.a = 0.0;
+    ground = mix(ground, vec4(rock.rgb * 0.9, 0.0), wall);
+    // A wall rarely faces the sun: a neutral lift so a pit is not a black hole (no blue tint).
+    float amb = dot(AmbientColor_FogEnd.xyz, vec3(0.3333));
+    currColor += vec3(amb * 0.3 * wall);
   }
 
   out_color = ground;
