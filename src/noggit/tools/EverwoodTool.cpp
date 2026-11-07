@@ -6,6 +6,11 @@
 #include <noggit/ActionManager.hpp>
 #include <noggit/MapView.h>
 #include <noggit/World.h>
+#include <noggit/Log.h>
+#include <noggit/everwood/PaintPalette.hpp>
+#include <noggit/everwood/VoxelPaint3.hpp>
+#include <noggit/ui/CurrentTexture.h>
+#include <noggit/ui/TexturingGUI.h>
 #include <noggit/project/CurrentProject.hpp>
 #include <noggit/ui/tools/ToolPanel/ToolPanel.hpp>
 #include <opengl/context.hpp>
@@ -15,6 +20,7 @@
 #include <QtGui/QWheelEvent>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
+#include <QtWidgets/QCompleter>
 #include <QtWidgets/QDoubleSpinBox>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QGroupBox>
@@ -26,6 +32,7 @@
 #include <QtWidgets/QWidget>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 namespace Noggit
@@ -62,6 +69,38 @@ namespace Noggit
     glm::vec3 getPos(Edit const& e)
     {
       return { e.pos[0], e.pos[1], e.pos[2] };
+    }
+
+    // CONTRACT v3.10 paint (caves): the tool's limits (eme tools/paint.rs; the 8 yd cap is mode 7's validity).
+    constexpr float PAINT_RADIUS_MIN = 0.5f;
+    constexpr float PAINT_EDITED_MIN = 0.5f;   // a hit less edited than this is untouched ground
+
+    // A texture path as the palette spells it: lower case, backslashes.
+    std::string paletteForm(std::string path)
+    {
+      for (char& c : path)
+        c = c == '/' ? '\\' : char(std::tolower(static_cast<unsigned char>(c)));
+      return path;
+    }
+
+    int paletteIdOf(std::string const& path)
+    {
+      std::string const p = paletteForm(path);
+      for (size_t i = 0; i < PAINT_PALETTE_LEN; ++i)
+        if (p == PAINT_PALETTE[i])
+          return int(i);
+      return -1;
+    }
+
+    // eme tools/paint.rs texture_label: the path without "tileset\\" and ".blp".
+    QString paletteLabel(size_t id)
+    {
+      QString s = QString::fromLatin1(PAINT_PALETTE[id]);
+      if (s.startsWith("tileset\\"))
+        s = s.mid(8);
+      if (s.endsWith(".blp"))
+        s.chop(4);
+      return s;
     }
   }
 
@@ -114,6 +153,16 @@ namespace Noggit
     _lastSentMs.reset();
     _pending = first;
     tick(nowMs, out);
+  }
+
+  void EverwoodStrokeBuilder::beginEmpty(EverwoodStrokeConfig const& config)
+  {
+    _config = config;
+    _active = true;
+    _startZ = 0.f;
+    _lastSent.reset();
+    _lastSentMs.reset();
+    _pending.reset();
   }
 
   void EverwoodStrokeBuilder::update(uint64_t nowMs, Sample sample, std::vector<Sample>& out)
@@ -214,7 +263,7 @@ namespace Noggit
 
   float EverwoodTool::brushRadius() const
   {
-    return _kind == Kind::Bridge ? _bridgeRadius : _radius;
+    return _kind == Kind::Bridge ? _bridgeRadius : (_kind == Kind::Paint ? _paintRadius : _radius);
   }
 
   void EverwoodTool::setupUi(Ui::Tools::ToolPanel* toolPanel)
@@ -230,7 +279,8 @@ namespace Noggit
     auto* paintNote = new QLabel(
       "Texturing: paint voxel ground with the normal Texture Paint tool (Shift + left mouse). It edits the ADT's own "
       "layers, so it shows on the voxel surface at once and is saved with the ADT. Tops and gentle slopes take the "
-      "paint. Steep walls and undersides keep their fixed rock look, as in the game, and cannot be painted.", _panel);
+      "paint. Walls, undersides and cave floors (anything dug or built) take Tool > Paint (caves): it paints the "
+      "voxel volume itself, so a cave floor never paints the ground above it.", _panel);
     paintNote->setWordWrap(true);
     outer->addWidget(paintNote);
 
@@ -253,7 +303,7 @@ namespace Noggit
       return box;
     };
 
-    _kindBox = combo({ "Sculpt", "Flatten", "Bridge / Tunnel" });
+    _kindBox = combo({ "Sculpt", "Flatten", "Bridge / Tunnel", "Paint (caves)" });
     _modeBox = combo({ "Lower / Dig", "Raise / Build", "Smooth", "Push out", "Pull in" });
     _radiusBox = spin(0.5, 16.0, 0.5, _radius);
     _strengthBox = spin(1.0, 100.0, 1.0, _strength, 0);
@@ -283,6 +333,39 @@ namespace Noggit
     _form->addRow("Arch (yd)", _archBox);
     _form->addRow("Deck thickness (yd)", _thicknessBox);
 
+    // CONTRACT v3.10 Paint (caves): only the shared palette's textures (PaintPalette.hpp, the wire ids).
+    _paintBox = new QWidget(_panel);
+    auto* paintForm = new QFormLayout(_paintBox);
+    paintForm->setContentsMargins(0, 0, 0, 0);
+    _paintPreview = new Ui::current_texture(true, _paintBox);
+    _paintPreview->setToolTip("Drop a texture here from the texture palette (it must be one of the shared palette's).");
+    _paintTextureBox = new QComboBox(_paintBox);
+    _paintTextureBox->setEditable(true);
+    _paintTextureBox->setInsertPolicy(QComboBox::NoInsert);
+    _paintTextureBox->addItem("(none)");
+    for (size_t i = 0; i < PAINT_PALETTE_LEN; ++i)
+      _paintTextureBox->addItem(paletteLabel(i));
+    _paintTextureBox->completer()->setFilterMode(Qt::MatchContains);
+    _paintTextureBox->completer()->setCompletionMode(QCompleter::PopupCompletion);
+    _paintPickButton = new QPushButton("Use the Texture Paint texture", _paintBox);
+    _paintPickButton->setToolTip("Takes the texture selected in the Texture Paint tool, if it is in the shared palette.");
+    _opacityBox = spin(1.0, 100.0, 1.0, _paintOpacity, 0);
+    _paintFalloffBox = combo({ "Smooth", "Linear", "Flat" });
+    _eraseBox = new QCheckBox("Erase this texture", _paintBox);
+    _revealBox = new QCheckBox("Reveal (fade every cave texture)", _paintBox);
+    paintForm->addRow(_paintPreview);
+    paintForm->addRow("Texture", _paintTextureBox);
+    paintForm->addRow(_paintPickButton);
+    paintForm->addRow("Opacity (%)", _opacityBox);
+    paintForm->addRow("Falloff", _paintFalloffBox);
+    paintForm->addRow("", _eraseBox);
+    paintForm->addRow("", _revealBox);
+    auto* paintHelp = new QLabel("Paints dug or built voxel faces (cave floors, walls, ceilings) through the air the brush "
+                                 "reaches. Up to 4 cave textures per 16 yd block. Untouched ground: use Texture Paint.", _paintBox);
+    paintHelp->setWordWrap(true);
+    paintForm->addRow(paintHelp);
+    outer->addWidget(_paintBox);
+
     _bridgeLabel = new QLabel(_panel);
     _bridgeLabel->setWordWrap(true);
     outer->addWidget(_bridgeLabel);
@@ -306,6 +389,12 @@ namespace Noggit
     auto* reseedButton = new QPushButton("Re-seed from saved ADTs", _panel);
     reseedButton->setToolTip("Replays every edit on the ADT heights as saved on disk now. Use it after saving terrain changes under voxel edits.");
     outer->addWidget(reseedButton);
+
+    _hint = new QLabel(_panel);
+    _hint->setWordWrap(true);
+    _hint->setStyleSheet("color: #e0a040;");
+    _hint->setVisible(false);
+    outer->addWidget(_hint);
 
     _status = new QLabel(_panel);
     _status->setWordWrap(true);
@@ -331,7 +420,7 @@ namespace Noggit
     QObject::connect(_radiusBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v)
     {
       if (!_updating)
-        (_kind == Kind::Bridge ? _bridgeRadius : _radius) = float(v);
+        (_kind == Kind::Bridge ? _bridgeRadius : (_kind == Kind::Paint ? _paintRadius : _radius)) = float(v);
     });
     QObject::connect(_strengthBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v)
     {
@@ -361,6 +450,37 @@ namespace Noggit
     QObject::connect(_pushDirBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _pushAlongView = i == 1; });
     QObject::connect(_archBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _arch = float(v); });
     QObject::connect(_thicknessBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _thickness = float(v); });
+
+    QObject::connect(_paintTextureBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i)
+    {
+      if (!_updating)
+        setPaintTexture(i - 1);
+    });
+    QObject::connect(_paintPreview, &Ui::current_texture::texture_dropped, _panel, [this](std::string const& file)
+    {
+      if (!selectPaintText(QString::fromStdString(file)))
+      {
+        setHint("That texture is not in the shared cave-paint palette.");
+        setPaintTexture(_paintTexture);
+      }
+    });
+    QObject::connect(_paintPickButton, &QPushButton::clicked, _panel, [this]
+    {
+      auto const selected = Ui::selected_texture::get();
+      int const id = selected ? paletteIdOf((*selected)->file_key().filepath()) : -1;
+      if (id < 0)
+        setHint(selected ? "The Texture Paint texture is not in the shared cave-paint palette." : "No texture is selected in Texture Paint.");
+      else
+        setPaintTexture(id);
+    });
+    QObject::connect(_opacityBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _paintOpacity = float(v); });
+    QObject::connect(_paintFalloffBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _paintFalloff = uint8_t(i); });
+    QObject::connect(_eraseBox, &QCheckBox::toggled, _panel, [this](bool on) { _paintErase = on; });
+    QObject::connect(_revealBox, &QCheckBox::toggled, _panel, [this, changed](bool on)
+    {
+      _paintReveal = on;
+      changed();
+    });
 
     QObject::connect(_confirmButton, &QPushButton::clicked, _panel, [this] { confirmBridge(); });
     QObject::connect(_cancelButton, &QPushButton::clicked, _panel, [this] { cancelBridge(); });
@@ -400,6 +520,7 @@ namespace Noggit
     bool const pushPull = sculpt && (_mode == SculptMode::Push || _mode == SculptMode::Pull);
     bool const shapeMatters = bridge || pushPull || (sculpt && (_mode == SculptMode::Dig || _mode == SculptMode::Build));
     bool const softOptions = sculpt && !pushPull && !_hard;
+    bool const paint = _kind == Kind::Paint;
 
     auto show = [this](QWidget* field, bool visible)
     {
@@ -409,7 +530,7 @@ namespace Noggit
     };
     show(_modeBox, sculpt);
     show(_bridgeKindBox, bridge);
-    show(_strengthBox, !bridge);
+    show(_strengthBox, !bridge && !paint);
     show(_shapeBox, shapeMatters);
     show(_hardBox, sculpt && !pushPull);
     show(_falloffBox, softOptions);
@@ -422,8 +543,14 @@ namespace Noggit
     _bridgeLabel->setVisible(bridge);
     _confirmButton->setVisible(bridge);
     _cancelButton->setVisible(bridge);
+    _paintBox->setVisible(paint);
+    _eraseBox->setEnabled(!_paintReveal);
+    if (!paint)
+      setHint({});
 
-    _radiusBox->setValue(bridge ? _bridgeRadius : _radius);
+    // Mode 7 is valid up to 8 yd (CONTRACT v3.10).
+    _radiusBox->setRange(paint ? PAINT_RADIUS_MIN : 0.5, paint ? PAINT3_MAX_RADIUS : 16.0);
+    _radiusBox->setValue(bridge ? _bridgeRadius : (paint ? _paintRadius : _radius));
     _shapeBox->setCurrentIndex(bridge ? _bridgeShape : _shape);
     _strengthBox->setValue(flatten ? _flattenStrength : (pushPull ? _pushStrength : _strength));
 
@@ -447,9 +574,56 @@ namespace Noggit
   {
     if (!_status)
       return;
-    _status->setText(QString("%1 edits in %2 strokes\nSaved after every stroke to:\n%3")
-                     .arg(_layer->liveEditCount()).arg(_layer->strokeCount())
+    _status->setText(QString("%1 edits in %2 strokes, %3 cave-painted blocks\nSaved after every stroke to:\n%4")
+                     .arg(_layer->liveEditCount()).arg(_layer->strokeCount()).arg(_layer->paintedChunkCount())
                      .arg(QString::fromStdString(_layer->filePath())));
+  }
+
+  void EverwoodTool::setHint(QString const& text)
+  {
+    if (!_hint)
+      return;
+    if (_hint->text() != text)
+      _hint->setText(text);
+    _hint->setVisible(!text.isEmpty());
+  }
+
+  void EverwoodTool::setPaintTexture(int id)
+  {
+    _paintTexture = id >= 0 && size_t(id) < PAINT_PALETTE_LEN ? id : -1;
+    _updating = true;
+    _paintTextureBox->setCurrentIndex(_paintTexture + 1);
+    _updating = false;
+    if (_paintTexture >= 0)
+    {
+      _paintPreview->set_texture(PAINT_PALETTE[_paintTexture]);
+      setHint({});
+    }
+  }
+
+  // eme tools/paint.rs select_text: a palette id, a full path, or a part of a path.
+  bool EverwoodTool::selectPaintText(QString const& text)
+  {
+    QString const t = text.trimmed();
+    bool number = false;
+    int const id = t.toInt(&number);
+    if (number && id >= 0 && size_t(id) < PAINT_PALETTE_LEN)
+    {
+      setPaintTexture(id);
+      return true;
+    }
+    int exact = paletteIdOf(t.toStdString());
+    if (exact < 0)
+    {
+      QString const needle = QString::fromStdString(paletteForm(t.toStdString()));
+      for (size_t i = 0; i < PAINT_PALETTE_LEN && exact < 0; ++i)
+        if (!needle.isEmpty() && QString::fromLatin1(PAINT_PALETTE[i]).contains(needle))
+          exact = int(i);
+    }
+    if (exact < 0)
+      return false;
+    setPaintTexture(exact);
+    return true;
   }
 
   bool EverwoodTool::setOption(QString const& key, QString const& value)
@@ -463,7 +637,12 @@ namespace Noggit
       return true;
     };
     bool const on = value == "1" || value == "on" || value == "true";
-    if (key == "tool") return pick(_kindBox, { "sculpt", "flatten", "bridge" });
+    if (key == "tool") return pick(_kindBox, { "sculpt", "flatten", "bridge", "paint" });
+    if (key == "texture") return selectPaintText(value);
+    if (key == "opacity") { _opacityBox->setValue(value.toDouble()); return true; }
+    if (key == "paint_falloff") return pick(_paintFalloffBox, { "smooth", "linear", "flat" });
+    if (key == "erase") { _eraseBox->setChecked(on); return true; }
+    if (key == "reveal") { _revealBox->setChecked(on); return true; }
     if (key == "mode") return pick(_modeBox, { "dig", "build", "smooth", "push", "pull" });
     if (key == "shape") return pick(_shapeBox, { "sphere", "cube", "cylinder" });
     if (key == "falloff") return pick(_falloffBox, { "smooth", "linear", "flat" });
@@ -582,6 +761,60 @@ namespace Noggit
     return e;
   }
 
+  // eme tools/paint.rs sample, Voxel3D: CONTRACT v3.10 mode 7 from the air side of the hit
+  std::optional<Edit> EverwoodTool::paintSample(AimHit const& hit, QString* why)
+  {
+    if (!_paintReveal && _paintTexture < 0)
+    {
+      *why = "Pick a cave texture first.";
+      return std::nullopt;
+    }
+    if (_layer->editedWeightAt(hit) < PAINT_EDITED_MIN)
+    {
+      *why = "Untouched ground: use the normal Texture Paint tool there. Paint (caves) paints dug or built voxel faces.";
+      return std::nullopt;
+    }
+    Edit e;
+    setPos(e, hit.pos + hit.normal * 0.5f);
+    e.radius = std::clamp(_paintRadius, PAINT_RADIUS_MIN, PAINT3_MAX_RADIUS);
+    e.mode = MODE_PAINT3;
+    e.strength = strengthU8(_paintOpacity);
+    Paint3Param p;
+    // REVEAL ignores the id: it works with no texture selected.
+    p.id = uint16_t(std::max(_paintTexture, 0));
+    p.falloff = _paintFalloff;
+    p.erase = _paintErase && !_paintReveal;
+    p.reveal = _paintReveal;
+    e.param = p.ToParam();
+    return e;
+  }
+
+  // paint3.rs would_refuse3: the whole dab is refused when a block it touches already has 4 other textures.
+  bool EverwoodTool::paintRefused(Edit const& e, QString* why)
+  {
+    std::vector<Key> const refusing = _layer->refusingChunks3(e);
+    if (refusing.empty())
+      return false;
+    *why = QString("This 16 yd block already has 4 cave textures (the limit). Erase one, or paint one of its own. Block %1 %2 %3.")
+             .arg(refusing[0][0]).arg(refusing[0][1]).arg(refusing[0][2]);
+    return true;
+  }
+
+  std::string EverwoodTool::paintRay(glm::vec3 const& origin, glm::vec3 const& dir)
+  {
+    auto const hit = _layer->raycast(origin, dir, AIM_RANGE);
+    if (!hit)
+      return "no voxel surface on the ray";
+    QString why;
+    auto const e = paintSample(*hit, &why);
+    if (!e)
+      return why.toStdString();
+    if (paintRefused(*e, &why))
+      return why.toStdString();
+    applyStroke({ *e });
+    return {};
+  }
+
   // ------------------------------------------------------------------------------------------- strokes
   void EverwoodTool::openAction(int modality)
   {
@@ -602,7 +835,25 @@ namespace Noggit
   void EverwoodTool::commit(std::vector<Edit> const& edits)
   {
     for (Edit const& e : edits)
+    {
+      if (e.mode == MODE_PAINT3 && _strokeHeld)
+      {
+        QString why;
+        if (paintRefused(e, &why))
+        {
+          setHint(why);
+          continue;
+        }
+        // A paint stroke opens its undo step with its first dab: a stroke of refused dabs leaves none.
+        if (!_actionOpen)
+        {
+          openAction(ActionModalityControllers::eLMB);
+          _actionOpen = true;
+        }
+        setHint({});
+      }
       _layer->addEdit(e, _strokeId);
+    }
   }
 
   void EverwoodTool::beginStroke(AimHit const& hit)
@@ -612,6 +863,25 @@ namespace Noggit
     _flattenPlane = hit.pos.z + _offset;
     _lastCentre.reset();
     _softenNext = false;
+
+    if (_kind == Kind::Paint)
+    {
+      // Like sculpt (eme stroke.rs: resend when the centre moved radius / 2 or every 125 ms held still), but
+      // a refused dab sends nothing and the stroke goes on.
+      _actionOpen = false;
+      std::vector<Edit> out;
+      QString why;
+      if (auto const first = paintSample(hit, &why))
+        _builder.begin(EverwoodStrokeConfig{}, _nowMs, *first, out);
+      else
+      {
+        setHint(why);
+        _builder.beginEmpty(EverwoodStrokeConfig{});
+      }
+      commit(out);
+      return;
+    }
+
     openAction(ActionModalityControllers::eLMB);
 
     bool const pushPull = _kind == Kind::Sculpt && (_mode == SculptMode::Push || _mode == SculptMode::Pull);
@@ -638,11 +908,17 @@ namespace Noggit
     std::vector<Edit> out;
     bool const pushPull = _kind == Kind::Sculpt && (_mode == SculptMode::Push || _mode == SculptMode::Pull);
     std::optional<Edit> last;
-    if (_aim && !pushPull)
+    if (_aim && _kind == Kind::Paint)
+    {
+      QString why;
+      last = paintSample(*_aim, &why);
+    }
+    else if (_aim && !pushPull)
       last = sculptSample(*_aim);
     _builder.end(_nowMs, last, out);
     commit(out);
     _strokeHeld = false;
+    _actionOpen = false;
     _layer->endStroke();
     updateStatus();
   }
@@ -687,6 +963,17 @@ namespace Noggit
             _lastCentre = getPos(e);
             _softenNext = _pushEdge != 0;
           }
+        }
+      }
+      else if (_kind == Kind::Paint)
+      {
+        QString why;
+        if (auto const sample = paintSample(*_aim, &why))
+          _builder.update(_nowMs, *sample, out);
+        else
+        {
+          setHint(why);
+          _builder.tick(_nowMs, out);
         }
       }
       else
@@ -822,7 +1109,7 @@ namespace Noggit
     if (!params.mod_alt_down)
       return;
     float const step = params.event.angleDelta().y() > 0 ? 0.5f : -0.5f;
-    _radiusBox->setValue(std::clamp(double(brushRadius() + step), 0.5, 16.0));
+    _radiusBox->setValue(std::clamp(double(brushRadius() + step), 0.5, _kind == Kind::Paint ? double(PAINT3_MAX_RADIUS) : 16.0));
   }
 
   void EverwoodTool::postRender()
@@ -864,7 +1151,15 @@ namespace Noggit
       return;
     }
 
-    if (_aim)
+    if (_aim && _kind == Kind::Paint)
+    {
+      // The dab's flood origin, on the air side of the face; grey where the hit would be refused.
+      bool const ok = _layer->editedWeightAt(*_aim) >= PAINT_EDITED_MIN && (_paintReveal || _paintTexture >= 0);
+      glm::vec4 const color = !ok ? glm::vec4(0.6f, 0.6f, 0.6f, 1.f)
+                            : (_paintErase || _paintReveal ? glm::vec4(1.f, 0.5f, 0.9f, 1.f) : glm::vec4(0.75f, 0.45f, 1.f, 1.f));
+      drawBrush(_aim->pos + _aim->normal * 0.5f, std::clamp(_paintRadius, PAINT_RADIUS_MIN, PAINT3_MAX_RADIUS), SHAPE_SPHERE, color);
+    }
+    else if (_aim)
     {
       bool const usesShape = _kind == Kind::Sculpt && _mode != SculptMode::Smooth;
       glm::vec4 color(1.f, 0.85f, 0.3f, 1.f);

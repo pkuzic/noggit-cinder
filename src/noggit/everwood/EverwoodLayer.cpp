@@ -1,6 +1,8 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
 #include <noggit/everwood/EverwoodLayer.hpp>
+#include <noggit/everwood/PaintPalette.hpp>
+#include <noggit/everwood/VoxelPaint3.hpp>
 
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/Log.h>
@@ -232,13 +234,23 @@ namespace Noggit::Everwood
     edit.nonce = _nextNonce;
     edit.stroke = stroke;
     edit.map = _mapId;
-    if (!edit.IsValid() || !edit.IsApplied())
+    // Density edits and (CONTRACT v3.10) the mode-7 3D paint; 4 / 5 are never made here.
+    if (!edit.IsValid() || !(edit.IsApplied() || IsPaint3(edit)))
       return;
 
     ++_nextSeq;
     _nextNonce = uint16_t(_nextNonce + 1);
     _entries.push_back({ edit, false });
     _journal.Add(edit);
+    // Appended in canonical order: the dab applied to the live field equals the full replay, and a density
+    // edit after every dab changes no paint. The journal's dirty set has nothing left to rebuild.
+    _journal.TakePaint3Dirty();
+
+    if (IsPaint3(edit))
+    {
+      notePaintChanged(_field.ApplyPaint3(edit));
+      return;
+    }
 
     std::vector<Key> added;
     std::vector<Key> const changed = _field.ApplyEdit(edit, &added);
@@ -261,37 +273,92 @@ namespace Noggit::Everwood
 
   void EverwoodLayer::setStrokeUndone(uint16_t stroke, bool undone)
   {
+    // Only density edits activate chunks and seed the density closure; a mode-7 dab's chunks are paint-only
+    // (CONTRACT v3.10: never activated) and come back through the journal's paint dirty set.
     std::vector<Key> touched;
-    for (Entry& e : _entries)
+    bool any = false;
+    for (Entry const& e : _entries)
     {
       if (e.edit.stroke != stroke || e.undone == undone)
         continue;
-      e.undone = undone;
-      for (Key const& k : e.edit.TouchedChunks())
-        touched.push_back(k);
+      any = true;
+      if (e.edit.IsApplied())
+        for (Key const& k : e.edit.TouchedChunks())
+          touched.push_back(k);
     }
-    if (touched.empty())
+    if (!any)
       return;
 
     // The closure on both sides of the change: a chunk may be linked to the stroke only through an edit of
     // the stroke itself (undo) or only once it is back (redo).
-    std::set<Key> closure = _journal.ReadClosure(touched);
-    rebuildJournal();
-    std::set<Key> const after = _journal.ReadClosure(touched);
-    closure.insert(after.begin(), after.end());
+    std::set<Key> closure = touched.empty() ? std::set<Key>{} : _journal.ReadClosure(touched);
+
+    // The journal changes edit by edit (Remove / Insert at the canonical position), so its paint dirty set
+    // holds exactly the chunks whose 3D paint the change can alter.
+    _journal.TakePaint3Dirty();
+    if (undone)
+    {
+      std::vector<size_t> positions;
+      size_t live = 0;
+      for (Entry const& e : _entries)
+      {
+        if (e.undone)
+          continue;
+        if (e.edit.stroke == stroke)
+          positions.push_back(live);
+        ++live;
+      }
+      for (Entry& e : _entries)
+        if (e.edit.stroke == stroke)
+          e.undone = true;
+      for (auto it = positions.rbegin(); it != positions.rend(); ++it)
+        _journal.Remove(*it);
+    }
+    else
+    {
+      size_t live = 0;
+      for (Entry& e : _entries)
+      {
+        if (e.edit.stroke == stroke && e.undone)
+        {
+          e.undone = false;
+          _journal.Insert(live, e.edit);
+        }
+        if (!e.undone)
+          ++live;
+      }
+    }
+
+    if (!touched.empty())
+    {
+      std::set<Key> const after = _journal.ReadClosure(touched);
+      closure.insert(after.begin(), after.end());
+    }
 
     std::vector<Key> added;
     if (!undone)
       for (Key const& k : closure)
         _field.Activate(k, &added);
 
+    // world.rs rebuild recipe: the paint keys' read closure rebuilt in lockstep with the density closure (both
+    // are closed, so is their union).
+    std::set<Key> const dirtySet = _journal.TakePaint3Dirty();
+    std::vector<Key> const dirty(dirtySet.begin(), dirtySet.end());
+    if (!dirty.empty())
+    {
+      std::set<Key> const paintClosure = _journal.ReadClosure(dirty);
+      closure.insert(paintClosure.begin(), paintClosure.end());
+    }
+
     std::vector<Key> keys;
     for (Key const& k : closure)
       if (_field.IsActive(k))
         keys.push_back(k);
-    _field.Rebuild(keys, _journal.EditsFor(keys));
+    std::vector<Key> const all(closure.begin(), closure.end());
+    _field.RebuildPaint(keys, dirty, _journal.EditsFor(all));
 
     noteChanged(keys, &added);
+    notePaintChanged(dirty);
     flushColumns();
     save();
   }
@@ -324,6 +391,55 @@ namespace Noggit::Everwood
     if (added)
       for (Key const& k : *added)
         dirtyAround(k);
+  }
+
+  void EverwoodLayer::notePaintChanged(std::vector<Key> const& keys)
+  {
+    // A mesh's paint weights read its own chunk and one sample of each neighbour (the window apron).
+    for (Key const& k : keys)
+      for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+          for (int dx = -1; dx <= 1; ++dx)
+          {
+            Key const n{ k[0] + dx, k[1] + dy, k[2] + dz };
+            if (_field.IsActive(n))
+              _dirtyMeshes.insert(n);
+          }
+  }
+
+  float EverwoodLayer::editedWeightAt(AimHit const& hit)
+  {
+    Key const key{ int32_t(std::floor(hit.pos.x / CHUNK_YARDS)), int32_t(std::floor(hit.pos.y / CHUNK_YARDS))
+                 , int32_t(std::floor(hit.pos.z / CHUNK_YARDS)) };
+    if (!_field.IsActive(key))
+      return 0.f;
+    // world.rs edited_weights for one "vertex" at the hit, with the hit's normal, in the window of its chunk.
+    std::vector<int8_t> window(WINDOW);
+    _field.Window(key, window.data());
+    std::vector<float> seedHeights(size_t(SAMPLES) * SAMPLES);
+    _field.WindowSeedHeights(key, seedHeights.data());
+    auto const origin = WindowOrigin(key);
+    Mesh point;
+    point.pos = { hit.pos.x - origin[0], hit.pos.y - origin[1], hit.pos.z - origin[2] };
+    point.nrm = { hit.normal.x, hit.normal.y, hit.normal.z };
+    std::vector<float> weight;
+    EditedWeights(point, window.data(), seedHeights.data(), origin[2], weight);
+    return weight.empty() ? 0.f : weight[0];
+  }
+
+  std::vector<Key> EverwoodLayer::refusingChunks3(Edit const& e)
+  {
+    return RefusingChunks3(e, [this](int32_t x, int32_t y, int32_t z) { return _field.Sample(x, y, z); }, _field.PaintRef());
+  }
+
+  size_t EverwoodLayer::paintedChunkCount() const
+  {
+    return _field.PaintRef().size();
+  }
+
+  uint64_t EverwoodLayer::paintHash() const
+  {
+    return Paint3Hash(_field.PaintRef());
   }
 
   // ------------------------------------------------------------------------- what is edited, per column
@@ -654,7 +770,7 @@ namespace Noggit::Everwood
     QDir().mkpath(QFileInfo(path).absolutePath());
 
     std::ostringstream out;
-    out << "{\n\"format\":\"mvoxj\",\n\"version\":1,\n\"wire\":\"EDIT3 CONTRACT v3.6\",\n"
+    out << "{\n\"format\":\"mvoxj\",\n\"version\":1,\n\"wire\":\"EDIT3 CONTRACT v3.10\",\n"
         << "\"mapDirectory\":" << jsonString(_mapDirectory) << ",\n\"map\":" << _mapId << ",\n"
         << "\"nextSeq\":" << _nextSeq << ",\n\"nextNonce\":" << _nextNonce << ",\n\"nextStroke\":" << _nextStroke << ",\n"
         << "\"edits\":[\n";
@@ -747,14 +863,19 @@ namespace Noggit::Everwood
       kv.second.indexCount = 0;
 
     rebuildJournal();
+    _journal.TakePaint3Dirty();
     std::vector<Key> added;
     std::vector<Key> changed;
+    std::vector<Key> painted;
     for (Edit const& e : _journal.Edits())
     {
-      std::vector<Key> const c = _field.ApplyEdit(e, &added);
-      changed.insert(changed.end(), c.begin(), c.end());
+      // In canonical order each dab reads exactly the field before it: the incremental paint is the replay.
+      std::vector<Key>& into = IsPaint3(e) ? painted : changed;
+      std::vector<Key> const c = IsPaint3(e) ? _field.ApplyPaint3(e) : _field.ApplyEdit(e, &added);
+      into.insert(into.end(), c.begin(), c.end());
     }
     noteChanged(changed, &added);
+    notePaintChanged(painted);
     flushColumns();
   }
 
@@ -795,7 +916,7 @@ namespace Noggit::Everwood
     }
 
     std::ostringstream out;
-    out << "{\n\"format\":\"mvoxexport\",\n\"version\":1,\n\"wire\":\"EDIT3 CONTRACT v3.6\",\n"
+    out << "{\n\"format\":\"mvoxexport\",\n\"version\":1,\n\"wire\":\"EDIT3 CONTRACT v3.10\",\n"
         << "\"exportedAt\":" << jsonString(QDateTime::currentDateTime().toString(Qt::ISODate).toStdString()) << ",\n"
         << "\"noggitVersion\":" << jsonString(STRPRODUCTVER) << ",\n"
         << "\"project\":" << jsonString(projectName) << ",\n"
@@ -1048,11 +1169,91 @@ namespace Noggit::Everwood
     {
       glm::vec3 pos, normal;
       float wall;
+      glm::vec4 paint;   // CONTRACT v3.10: the 3D paint's slot weights (the mesh's paintMats order)
     };
     auto mixVertex = [](MeshVertex const& a, MeshVertex const& b, float t) -> MeshVertex
     {
-      return { glm::mix(a.pos, b.pos, t), glm::mix(a.normal, b.normal, t), a.wall + (b.wall - a.wall) * t };
+      return { glm::mix(a.pos, b.pos, t), glm::mix(a.normal, b.normal, t), a.wall + (b.wall - a.wall) * t
+             , glm::mix(a.paint, b.paint, t) };
     };
+
+    // CONTRACT v3.10 3D paint (as the game client's mesher): the mesh's slots are its own chunk's materials,
+    // then those of the neighbours its window apron reads (up to 4, by palette id). Per vertex, every slot's
+    // opacity is the trilinear interpolation of the 8 lattice samples of the cube around it. An unpainted
+    // neighbourhood leaves everything below exactly as before.
+    std::vector<uint16_t> paintMats;
+    auto addMats = [&](ChunkPaint3 const* p)
+    {
+      if (!p)
+        return;
+      for (uint16_t m : p->mats)
+        if (paintMats.size() < PAINT3_MAX_SLOTS && std::find(paintMats.begin(), paintMats.end(), m) == paintMats.end())
+          paintMats.push_back(m);
+    };
+    addMats(_field.PaintOf(key));
+    for (int dz = -1; dz <= 1; ++dz)
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+          if (dx || dy || dz)
+            addMats(_field.PaintOf(Key{ key[0] + dx, key[1] + dy, key[2] + dz }));
+
+    std::vector<glm::vec4> paintWeights;
+    if (!paintMats.empty())
+    {
+      struct Owner
+      {
+        ChunkPaint3 const* paint = nullptr;
+        int slot[PAINT3_MAX_SLOTS] = { -1, -1, -1, -1 };   // its slot -> the mesh's slot
+      };
+      std::map<Key, Owner> owners;
+      auto ownerOf = [&](Key const& k) -> Owner const&
+      {
+        auto it = owners.find(k);
+        if (it != owners.end())
+          return it->second;
+        Owner o;
+        o.paint = _field.PaintOf(k);
+        if (o.paint)
+          for (size_t s = 0; s < o.paint->mats.size() && s < PAINT3_MAX_SLOTS; ++s)
+          {
+            auto const at = std::find(paintMats.begin(), paintMats.end(), o.paint->mats[s]);
+            o.slot[s] = at == paintMats.end() ? -1 : int(at - paintMats.begin());
+          }
+        return owners.emplace(k, o).first->second;
+      };
+
+      int32_t const lx0 = key[0] * C - 1, ly0 = key[1] * C - 1, lz0 = key[2] * C - 1;
+      paintWeights.assign(nv, glm::vec4(0.f));
+      for (size_t i = 0; i < nv; ++i)
+      {
+        float const f[3] = { mesh.pos[i * 3] / VOXEL_SIZE, mesh.pos[i * 3 + 1] / VOXEL_SIZE, mesh.pos[i * 3 + 2] / VOXEL_SIZE };
+        int32_t cell[3];
+        float t[3];
+        for (int a = 0; a < 3; ++a)
+        {
+          cell[a] = std::clamp(int32_t(std::floor(f[a])), 0, SAMPLES - 2);
+          t[a] = clamp01(f[a] - float(cell[a]));
+        }
+        glm::vec4 acc(0.f);
+        for (int c = 0; c < 8; ++c)
+        {
+          int const ox = c & 1, oy = (c >> 1) & 1, oz = (c >> 2) & 1;
+          float const w = (ox ? t[0] : 1.f - t[0]) * (oy ? t[1] : 1.f - t[1]) * (oz ? t[2] : 1.f - t[2]);
+          if (w <= 0.f)
+            continue;
+          int32_t const gx = lx0 + cell[0] + ox, gy = ly0 + cell[1] + oy, gz = lz0 + cell[2] + oz;
+          Key const ok{ chunk_of(gx), chunk_of(gy), chunk_of(gz) };
+          Owner const& owner = ownerOf(ok);
+          if (!owner.paint)
+            continue;
+          auto const rgba = owner.paint->Rgba(owned_index(gx - ok[0] * C, gy - ok[1] * C, gz - ok[2] * C));
+          for (size_t s = 0; s < PAINT3_MAX_SLOTS; ++s)
+            if (owner.slot[s] >= 0)
+              acc[owner.slot[s]] += w * float(rgba[s]) / 255.f;
+        }
+        paintWeights[i] = acc;
+      }
+    }
 
     std::vector<MeshVertex> shaped(nv);
     std::vector<uint8_t> vertexNear(nv, 0);
@@ -1112,10 +1313,13 @@ namespace Noggit::Everwood
             normal = glm::normalize(normal + delta * (1.f - wall));
         }
       }
-      shaped[i] = { pos, normal, wall };
+      shaped[i] = { pos, normal, wall, paintWeights.empty() ? glm::vec4(0.f) : paintWeights[i] };
     }
 
-    constexpr size_t STRIDE = 20;
+    // 0-19 as before; 20-23 the 3D paint's slot weights, 24-27 its slot layers (flat, encoded like the ground
+    // layers: sampler slot * 4096 + array index, -1 = empty), filled in once the ground took its samplers.
+    constexpr size_t STRIDE = 28;
+    constexpr size_t PAINT_IDS = 24;
     std::vector<float> vertices;
     vertices.reserve(mesh.idx.size() * STRIDE);
     glm::vec3 bmin(std::numeric_limits<float>::max()), bmax(std::numeric_limits<float>::lowest());
@@ -1132,6 +1336,8 @@ namespace Noggit::Everwood
       v[12] = v[13] = v[14] = v[15] = -1.f;
       v[16] = v[17] = v[18] = 1.f;
       v[19] = 0.f;
+      v[20] = m.paint.x; v[21] = m.paint.y; v[22] = m.paint.z; v[23] = m.paint.w;
+      v[24] = v[25] = v[26] = v[27] = -1.f;
       if (layers && layers->chunk)
       {
         for (int k = 0; k < 4; ++k)
@@ -1241,6 +1447,51 @@ namespace Noggit::Everwood
         }
     }
 
+    // CONTRACT v3.10: the palette textures of the 3D paint take the samplers the ground left free. A slot that
+    // does not fit stays empty (its weight is then ignored), logged once.
+    if (!paintMats.empty())
+    {
+      float ids[PAINT3_MAX_SLOTS] = { -1.f, -1.f, -1.f, -1.f };
+      for (size_t k = 0; k < paintMats.size(); ++k)
+      {
+        uint16_t const id = paintMats[k];
+        if (id >= PAINT_PALETTE_LEN)
+          continue;
+        auto it = _paletteTextures.find(id);
+        if (it == _paletteTextures.end())
+          it = _paletteTextures.emplace(id, scoped_blp_texture_reference(PAINT_PALETTE[id], _world->getRenderContext())).first;
+        scoped_blp_texture_reference const& texture = it->second;
+        if (texture->loading_failed())
+          continue;
+        texture->upload();
+        if (!texture->is_uploaded())
+          return false;   // still loading: come back on a later frame
+        GLuint const array = texture->texture_array();
+        auto slot = std::find(arrays.begin(), arrays.end(), unsigned(array));
+        if (slot == arrays.end())
+        {
+          if (arrays.size() >= size_t(NUM_TEXTURE_UNITS))
+          {
+            if (!_paintBudgetLogged)
+            {
+              LogError << "Everwood: a voxel mesh needs more than " << NUM_TEXTURE_UNITS
+                       << " texture arrays; a cave texture is left out of it (" << PAINT_PALETTE[id] << ")" << std::endl;
+              _paintBudgetLogged = true;
+            }
+            continue;
+          }
+          arrays.push_back(array);
+          slot = arrays.end() - 1;
+        }
+        bool const specular = texture->is_specular() || texture->array_index() == 0;
+        ids[k] = float(int(slot - arrays.begin()) * 4096 + texture->array_index() + (specular ? LAYER_SPECULAR : 0));
+        keepAlive.push_back(texture);
+      }
+      for (size_t at = 0; at + STRIDE <= vertices.size(); at += STRIDE)
+        for (size_t k = 0; k < PAINT3_MAX_SLOTS; ++k)
+          vertices[at + PAINT_IDS + k] = ids[k];
+    }
+
     out.boundsMin = bmin;
     out.boundsMax = bmax;
     out.indexCount = int(vertices.size() / STRIDE);
@@ -1272,6 +1523,8 @@ namespace Noggit::Everwood
     attrib(5, 4, 12);   // layers
     attrib(6, 3, 16);   // vertex colour
     attrib(7, 1, 19);   // baked shadow
+    attrib(8, 4, 20);   // 3D paint slot weights
+    attrib(9, 4, PAINT_IDS);   // 3D paint slot layers
     gl.bindVertexArray(0);
     gl.bindBuffer(GL_ARRAY_BUFFER, 0);
     return true;
@@ -1400,6 +1653,7 @@ namespace Noggit::Everwood
     for (auto& kv : _meshes)
       freeChunkGl(kv.second);
     _meshes.clear();
+    _paletteTextures.clear();
     for (auto& kv : _masks)
       if (kv.second.texture)
       {

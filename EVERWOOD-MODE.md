@@ -27,6 +27,7 @@ The **Everwood** entry at the end of the left toolbar (the terrain icon, tooltip
 | Sculpt: Push out, Pull in | Grows sideways out of a surface or carves into it, along the surface normal or the view direction. Optional softened edge. |
 | Flatten | Levels toward the height clicked at the start of the stroke, plus an offset. |
 | Bridge / Tunnel | Click point A, point B, then click again or press **Build**. One stroke of hard edits along the path, with an arch and a deck thickness; up to 160 yd and 400 edits, as in the game. |
+| Paint (caves) | CONTRACT v3.10 3D voxel paint (journal mode 7): paints dug or built faces (cave floors, walls, ceilings) with a texture of the shared palette, through the air the brush reaches. See below. |
 
 Hold the left mouse button to paint a stroke. Alt + wheel changes the radius. One stroke is one undo: Ctrl+Z,
 Noggit's action history and the panel's buttons all work on it. Undoing rebuilds the affected chunks from the
@@ -47,6 +48,25 @@ the paint is saved with the ADT. The voxel edits, their wire format and their de
 
 Steep walls and undersides keep the fixed wall look of CONTRACT v3.3.6, as the game does: painting changes the ADT
 layers under them, which shows only on the tops and gentle slopes.
+
+### Paint (caves): the 3D voxel paint (CONTRACT v3.10, mode 7)
+
+Texture Paint is 2D: a cave floor would paint the ground above it. **Tool > Paint (caves)** paints the voxel
+volume instead. Each dab is one mode-7 edit at the hit + 0.5 yd along the surface normal (the air side); it floods
+through the air inside its sphere (never through a ceiling or a wall) and paints that air plus the solid samples
+bordering it. Options: a texture (only the 729 textures of the shared palette, `PaintPalette.hpp`: pick it in the
+list, type part of its name, drop one onto the preview, or take the Texture Paint tool's texture), radius 0.5-8 yd
+(default 3), opacity (default 30 %), falloff, **Erase this texture**, **Reveal** (fades every cave texture).
+A dab is refused, with a hint under the panel, on untouched ground (edited weight < 0.5: use Texture Paint
+there) and when a 16-yd block it touches already holds 4 other cave textures. A stroke of refused dabs leaves no
+undo step. Undo and redo rebuild exactly the chunks whose paint can change.
+
+Drawing: a painted chunk's mesh carries 4 slot weights per vertex (trilinear of the 8 lattice samples around it)
+and its 4 slot textures (its own chunk's materials, then those of the neighbours its window apron reads). Each slot
+is mapped like the face under it (the ground's triplanar on the top part, the wall's sharp triplanar on the wall
+part) and blended over the ground and the wall; a painted wall loses the edited-wall light lift in proportion. The
+palette textures use the samplers the ground layers left free (11 in all); a slot that does not fit is left out
+and logged once. Unpainted meshes are drawn exactly as before. Not exported to the ADT.
 
 ## How it is drawn
 
@@ -80,7 +100,7 @@ JSON, one edit per line:
 {
 "format":"mvoxj",
 "version":1,
-"wire":"EDIT3 CONTRACT v3.6",
+"wire":"EDIT3 CONTRACT v3.10",
 "mapDirectory":"Azeroth",
 "map":0,
 "nextSeq":3,
@@ -102,6 +122,8 @@ JSON, one edit per line:
 - Only live edits are stored; undone strokes are dropped from the file.
 - `mode`: 0 dig or lower, 1 build or raise, 2 smooth, 3 flatten. `param`: bit 15 soft (bits 0-1 falloff, 2-8
   hardness), bits 9-10 shape (1 cube, 2 cylinder) on modes 0 and 1; a signed plane offset in cm on mode 3.
+  CONTRACT v3.10 adds mode 7 (3D paint, radius <= 8): `param` bits 0-10 palette id, 11-12 falloff, 13 erase,
+  14 reveal. Files written before v3.10 (`"wire":"EDIT3 CONTRACT v3.6"`) load unchanged; the version stays 1.
 
 ### `.mvoxexport` format, version 1
 
@@ -111,7 +133,7 @@ The same `edits` array, plus what a server import needs to decide whether it may
 {
 "format":"mvoxexport",
 "version":1,
-"wire":"EDIT3 CONTRACT v3.6",
+"wire":"EDIT3 CONTRACT v3.10",
 "exportedAt":"2026-11-05T12:00:00",
 "noggitVersion":"...",
 "project":"MyProject",
@@ -149,6 +171,11 @@ goes to `settings/` next to the script, and results go to `<script>_result.txt`.
 `export`, `reseed`, `objects 0|1`, `camera_last dist height [side]`, `return_to_menu`, `settings_dialog_shot <png>`,
 `creation_dialog_shot <png>`, `paint_tool <texture> <radius> <pressure> <hardness>`, `everwood_tool`, `shift 0|1`,
 `cursor [0|1]`, `overlay shadows|mccv|lines 0|1`, `tint x y radius r g b`, `action_undo`, `action_redo`.
+Paint (caves): `set tool paint`, `set texture <id|path|part>`, `set opacity <pct>`, `set paint_falloff
+smooth|linear|flat`, `set erase 0|1`, `set reveal 0|1`; `paint_ray ox oy oz dx dy dz [ok|refused]`, `anchor` (the
+last edit's position), `paint_rel ...` (paint_ray from the anchor), `camera_anchor dist height [side]`,
+`camera_look cx cy cz tx ty tz` (both relative to the anchor), `expect_painted [>]n`, `phash_save <name>`,
+`phash_same <name>`, `phash_differs <name>`; `status` also prints the painted chunks and the paint hash.
 
 ## WMO scale
 

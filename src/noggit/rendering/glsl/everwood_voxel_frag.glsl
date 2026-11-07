@@ -62,6 +62,8 @@ in float vary_wall;
 flat in vec4 vary_layers;
 in vec3 vary_mccv;
 in float vary_shadow;
+in vec4 vary_paint_weights;
+flat in vec4 vary_paint_layers;
 
 out vec4 out_color;
 
@@ -146,6 +148,23 @@ vec4 blend_tri(vec2 top_uv, vec3 n)
   return c / max(sum, 1e-4);
 }
 
+// CONTRACT v3.10: one 3D paint slot, mapped like the face under it: the ground's own triplanar on the top
+// part, the walls' sharp |n|^6 triplanar (the same projections as the rock block in main) on the wall part.
+vec4 paint_slot(float id, vec3 n, float wall)
+{
+  vec3 w4 = pow(abs(n), vec3(4.0));
+  w4 /= (w4.x + w4.y + w4.z);
+  vec4 top = layer_color(vary_uv, id) * w4.y
+           + layer_color(vary_position.xy / UNITSIZE, id) * w4.x
+           + layer_color(vary_position.zy / UNITSIZE, id) * w4.z;
+  vec3 w6 = pow(abs(n), vec3(6.0));
+  w6 /= (w6.x + w6.y + w6.z);
+  vec4 side = layer_color(vary_position.xy / UNITSIZE, id) * w6.x
+            + layer_color(vary_position.zy / UNITSIZE, id) * w6.z
+            + layer_color(vary_position.xz / UNITSIZE, id) * w6.y;
+  return mix(top, vec4(side.rgb * 0.9, 0.0), wall);
+}
+
 void main()
 {
   float dist_from_camera = distance(camera, vary_position);
@@ -170,6 +189,7 @@ void main()
 
   vec4 ground = blend_tri(vary_uv, normalized_normal);
   float wall = clamp(vary_wall, 0.0, 1.0);
+  float wall_lift = 0.0;
   if (wall > 0.0 && vary_layers.x >= 0.0)
   {
     // Everwood (mapper report 3.43, as the game's monkey_voxel.wgsl): an edited wall wears the chunk's most
@@ -202,8 +222,24 @@ void main()
     ground = mix(ground, vec4(rock.rgb * 0.9, 0.0), wall);
     // A wall rarely faces the sun: a neutral lift so a pit is not a black hole (no blue tint).
     float amb = dot(AmbientColor_FogEnd.xyz, vec3(0.3333));
-    currColor += vec3(amb * 0.3 * wall);
+    wall_lift = amb * 0.3 * wall;
   }
+
+  // CONTRACT v3.10 (as the game's monkey_voxel.wgsl): the 3D voxel paint on top of the ground and the wall.
+  // Slot k's weight is its opacity over everything below; an empty slot (-1) is skipped, so a mesh without
+  // paint is drawn exactly as before.
+  float paint_cover = 0.0;
+  for (int i = 0; i < 4; ++i)
+  {
+    float id = vary_paint_layers[i];
+    if (id < 0.0)
+      continue;
+    float pw = clamp(vary_paint_weights[i], 0.0, 1.0);
+    ground = mix(ground, paint_slot(id, normalized_normal, wall), pw);
+    paint_cover += pw;
+  }
+  // A painted face shows its texture under the zone's own light: the edited wall's lift fades with the cover.
+  currColor += vec3(wall_lift * (1.0 - clamp(paint_cover, 0.0, 1.0)));
 
   out_color = ground;
   vec3 spc = out_color.a * out_color.rgb * pow(specularFactor, 8);

@@ -9,6 +9,9 @@ layout (location = 4) in float wall;
 layout (location = 5) in vec4 layers;
 layout (location = 6) in vec3 mccv;
 layout (location = 7) in float shadow;
+// CONTRACT v3.10 3D paint: 4 slot weights (trilinear per vertex) + the 4 slot layers (-1 = empty).
+layout (location = 8) in vec4 paint_weights;
+layout (location = 9) in vec4 paint_layers;
 
 layout (std140) uniform matrices
 {
@@ -24,6 +27,8 @@ out float vary_wall;
 flat out vec4 vary_layers;
 out vec3 vary_mccv;
 out float vary_shadow;
+out vec4 vary_paint_weights;
+flat out vec4 vary_paint_layers;
 
 void main()
 {
@@ -36,4 +41,6 @@ void main()
   vary_layers = layers;
   vary_mccv = mccv;
   vary_shadow = shadow;
+  vary_paint_weights = paint_weights;
+  vary_paint_layers = paint_layers;
 }

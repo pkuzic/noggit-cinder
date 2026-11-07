@@ -86,6 +86,14 @@ namespace Noggit::Everwood
     std::optional<glm::vec3> surfaceUnderCursor(glm::vec3 const& origin, glm::vec3 const& dir
                                                , std::optional<glm::vec3> const& terrainHit);
 
+    // CONTRACT v3.10 3D paint (mode 7): how edited the voxel surface is at a hit (world.rs edited_weights, 0 on
+    // the seeded ground, 1 far off it; 0 where no chunk is active), and the chunks that would refuse a dab
+    // because they already hold 4 other cave textures (paint3.rs would_refuse3, on the live field).
+    float editedWeightAt(AimHit const& hit);
+    std::vector<Voxel::Key> refusingChunks3(Voxel::Edit const& e);
+    size_t paintedChunkCount() const;
+    uint64_t paintHash() const;
+
     size_t liveEditCount() const { return _journal.Edits().size(); }
     Voxel::Edit const* lastEdit() const { return _journal.Edits().empty() ? nullptr : &_journal.Edits().back(); }
     size_t strokeCount() const;
@@ -158,6 +166,8 @@ namespace Noggit::Everwood
 
     void rebuildJournal();
     void noteChanged(std::vector<Voxel::Key> const& keys, std::vector<Voxel::Key> const* added);
+    // 3D paint changed in these chunks: rebuild the meshes that read them (own + the window apron).
+    void notePaintChanged(std::vector<Voxel::Key> const& keys);
     void flushColumns();
     void recomputeColumn(Voxel::ColKey const& col);
     void writeMaskAround(Voxel::ColKey const& col);
@@ -194,6 +204,10 @@ namespace Noggit::Everwood
     std::unordered_map<Voxel::Key, ChunkGl, Voxel::KeyHash> _meshes;
     std::unordered_map<int, TileMask> _masks;
     glm::vec3 _editedMin{ 1.f }, _editedMax{ 0.f };   // WoW axes; empty when max < min
+
+    // CONTRACT v3.10: the palette textures the 3D paint uses, by palette id (loaded once, shared by the meshes).
+    std::unordered_map<uint16_t, scoped_blp_texture_reference> _paletteTextures;
+    bool _paintBudgetLogged = false;
 
     std::unique_ptr<OpenGL::program> _program;
     QOpenGLContext* _glContext = nullptr;

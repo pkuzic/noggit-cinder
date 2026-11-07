@@ -368,6 +368,13 @@ namespace Noggit::Everwood
       return buf;
     }
 
+    std::string paintHashText()
+    {
+      char buf[32];
+      std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(requireTool()->layer()->paintHash()));
+      return buf;
+    }
+
     bool runEverwood(QString const& cmd, QStringList const& a, QString const& line)
     {
       auto f = [&](int i) { return a.value(i).toFloat(); };
@@ -458,7 +465,79 @@ namespace Noggit::Everwood
         auto* layer = requireTool()->layer();
         report("edits " + std::to_string(layer->liveEditCount()) + " strokes " + std::to_string(layer->strokeCount())
                + " active chunks " + std::to_string(layer->activeChunkCount()) + " hidden cells " + std::to_string(layer->hiddenCellCount())
-               + " hash " + hashText());
+               + " hash " + hashText() + " painted " + std::to_string(layer->paintedChunkCount()) + " paint_hash " + paintHashText());
+      }
+      else if (cmd == "paint_ray")
+      {
+        // paint_ray <ox> <oy> <oz> <dx> <dy> <dz> [ok|refused]: one Paint (caves) dab where the ray (WoW axes)
+        // meets the voxel surface, through the tool's own checks (texture, edited weight, 4-texture limit)
+        std::string const why = requireTool()->paintRay(glm::vec3(f(1), f(2), f(3)), glm::vec3(f(4), f(5), f(6)));
+        report(why.empty() ? std::string("paint_ray painted, ") + std::to_string(requireTool()->layer()->paintedChunkCount())
+                               + " painted chunks, paint_hash " + paintHashText()
+                           : "paint_ray refused: " + why);
+        if (a.size() > 7)
+          expect(why.empty() == (a.value(7) == "ok"), "paint_ray " + a.value(7).toStdString());
+      }
+      else if (cmd == "anchor")
+      {
+        // anchor: remember the last edit's position (WoW axes) for paint_rel / camera_anchor
+        auto const* edit = requireTool()->layer()->lastEdit();
+        if (!edit)
+        {
+          expect(false, "anchor: no edit");
+          return true;
+        }
+        _anchor = glm::vec3(edit->pos[0], edit->pos[1], edit->pos[2]);
+        report("anchor " + std::to_string(_anchor.x) + " " + std::to_string(_anchor.y) + " " + std::to_string(_anchor.z));
+      }
+      else if (cmd == "paint_rel")
+      {
+        // paint_rel <ox> <oy> <oz> <dx> <dy> <dz> [ok|refused]: paint_ray with the origin relative to the anchor
+        std::string const why = requireTool()->paintRay(_anchor + glm::vec3(f(1), f(2), f(3)), glm::vec3(f(4), f(5), f(6)));
+        report(why.empty() ? std::string("paint_rel painted, ") + std::to_string(requireTool()->layer()->paintedChunkCount())
+                               + " painted chunks, paint_hash " + paintHashText()
+                           : "paint_rel refused: " + why);
+        if (a.size() > 7)
+          expect(why.empty() == (a.value(7) == "ok"), "paint_rel " + a.value(7).toStdString());
+      }
+      else if (cmd == "camera_anchor")
+      {
+        // camera_anchor <distance> <height> [side]: camera <distance> yd along WoW +x of the anchor, <height> above
+        // it, looking at it
+        float const dist = f(1), height = f(2), side = f(3);
+        _view->_camera.position = glm::vec3(ZEROPOINT - _anchor.y - side, _anchor.z + height, ZEROPOINT - _anchor.x - dist);
+        _view->_camera.yaw(math::degrees(std::atan2(side, dist) * 57.29578f));
+        _view->_camera.pitch(math::degrees(std::atan2(height, std::sqrt(dist * dist + side * side)) * 57.29578f));
+        _view->_camera_moved_since_last_draw = true;
+      }
+      else if (cmd == "camera_look")
+      {
+        // camera_look <cx> <cy> <cz> <tx> <ty> <tz>: camera at anchor + c looking at anchor + t (WoW axes)
+        glm::vec3 const cam = _anchor + glm::vec3(f(1), f(2), f(3));
+        glm::vec3 const d = _anchor + glm::vec3(f(4), f(5), f(6)) - cam;
+        _view->_camera.position = Noggit::Everwood::wowToNoggit(cam);
+        _view->_camera.yaw(math::degrees(std::atan2(-d.y, -d.x) * 57.29578f));
+        _view->_camera.pitch(math::degrees(std::atan2(-d.z, std::sqrt(d.x * d.x + d.y * d.y)) * 57.29578f));
+        _view->_camera_moved_since_last_draw = true;
+      }
+      else if (cmd == "expect_painted")
+      {
+        size_t const n = requireTool()->layer()->paintedChunkCount();
+        bool const atLeast = a.value(1).startsWith('>');
+        size_t const want = a.value(1).mid(atLeast ? 1 : 0).toULongLong();
+        expect(atLeast ? n > want : n == want, "painted chunks " + std::to_string(n) + " vs " + a.value(1).toStdString());
+      }
+      else if (cmd == "phash_save")
+      {
+        _hashes["paint:" + a.value(1).toStdString()] = paintHashText();
+        report("paint hash " + a.value(1).toStdString() + " = " + paintHashText());
+      }
+      else if (cmd == "phash_same" || cmd == "phash_differs")
+      {
+        std::string const h = paintHashText();
+        std::string const other = _hashes["paint:" + a.value(1).toStdString()];
+        bool const same = h == other;
+        expect(cmd == "phash_same" ? same : !same, "paint hash " + h + (cmd == "phash_same" ? " == " : " != ") + a.value(1).toStdString() + " " + other);
       }
       else if (cmd == "expect_edits")
       {
@@ -771,6 +850,7 @@ namespace Noggit::Everwood
     int _map_id = 0;
     Qt::MouseButtons _held = Qt::NoButton;
     float _scratch = 0.f;
+    glm::vec3 _anchor{ 0.f };
     std::map<std::string, std::string> _hashes;
 
     int _left = 2580, _top = 20, _width = 1500, _height = 950;

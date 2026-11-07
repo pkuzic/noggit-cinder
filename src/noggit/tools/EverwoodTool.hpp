@@ -1,7 +1,8 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 //
 // The "Everwood" tool panel: sculpt (dig / build / smooth, push / pull), flatten, bridge / tunnel on the
-// voxel layer, the same brushes as the game's EME map editor (crates/eme/src/tools). Only created when
+// voxel layer, and (CONTRACT v3.10) "Paint (caves)", the 3D voxel paint (journal mode 7) of dug and built faces;
+// the same brushes as the game's EME map editor (crates/eme/src/tools). Only created when
 // the project has EverwoodMode. See EVERWOOD-MODE.md.
 #pragma once
 
@@ -24,10 +25,16 @@ class QLabel;
 class QPushButton;
 class QWidget;
 class QFormLayout;
+class QLineEdit;
 class QString;
 
 namespace Noggit
 {
+  namespace Ui
+  {
+    class current_texture;
+  }
+
   // eme-core stroke.rs EmeStrokeBuilder: a held brush becomes one stroke of sparse edits. Send when the
   // centre moved >= radius / 2 or 125 ms passed. Idempotent modes (hard dig / build) held still do not
   // resend; hard dig / build measure movement in the ground plane only and stay within a depth cap.
@@ -46,6 +53,8 @@ namespace Noggit
     using Sample = Everwood::Voxel::Edit;
 
     void begin(EverwoodStrokeConfig const& config, uint64_t nowMs, Sample const& first, std::vector<Sample>& out);
+    // A stroke whose press produced no sample (a refused paint dab): the first accepted sample is sent at once.
+    void beginEmpty(EverwoodStrokeConfig const& config);
     void update(uint64_t nowMs, Sample sample, std::vector<Sample>& out);
     void tick(uint64_t nowMs, std::vector<Sample>& out);
     void end(uint64_t nowMs, std::optional<Sample> sample, std::vector<Sample>& out);
@@ -68,7 +77,7 @@ namespace Noggit
   class EverwoodTool final : public Tool
   {
   public:
-    enum class Kind { Sculpt = 0, Flatten = 1, Bridge = 2 };
+    enum class Kind { Sculpt = 0, Flatten = 1, Bridge = 2, Paint = 3 };
     enum class SculptMode { Dig = 0, Build = 1, Smooth = 2, Push = 3, Pull = 4 };
 
     explicit EverwoodTool(MapView* mapView);
@@ -103,6 +112,10 @@ namespace Noggit
     void setBridgePoint(glm::vec3 const& wow);
     // One scripted stroke of exact edits, as the mouse would have produced them.
     void applyStroke(std::vector<Everwood::Voxel::Edit> const& edits);
+    // Paint (caves): one dab where a ray meets the voxel surface (WoW axes), through the tool's own checks.
+    // Returns an empty string when it painted, else why it did not.
+    std::string paintRay(glm::vec3 const& origin, glm::vec3 const& dir);
+    int paintTexture() const { return _paintTexture; }
 
   private:
     using Edit = Everwood::Voxel::Edit;
@@ -115,6 +128,12 @@ namespace Noggit
     Edit pushPullSample(Everwood::AimHit const& hit) const;
     Edit softenSample(glm::vec3 const& centre) const;
     uint16_t strengthWire() const;
+    // CONTRACT v3.10 mode 7 at hit + 0.5 yd * normal (the air side); nullopt + why when the hit is refused.
+    std::optional<Edit> paintSample(Everwood::AimHit const& hit, QString* why);
+    bool paintRefused(Edit const& e, QString* why);
+    void setPaintTexture(int id);
+    bool selectPaintText(QString const& text);
+    void setHint(QString const& text);
 
     void beginStroke(Everwood::AimHit const& hit);
     void endStroke();
@@ -157,6 +176,14 @@ namespace Noggit
     uint8_t _bridgeShape = Everwood::Voxel::SHAPE_CUBE;
     float _arch = 0.f;
     float _thickness = 1.5f;
+    // Paint (caves), eme tools/paint.rs defaults
+    int _paintTexture = -1;        // palette id, -1 none
+    float _paintRadius = 3.f;
+    float _paintOpacity = 30.f;
+    uint8_t _paintFalloff = Everwood::Voxel::FALLOFF_SMOOTH;
+    bool _paintErase = false;
+    bool _paintReveal = false;
+    bool _actionOpen = false;
 
     // The stroke.
     EverwoodStrokeBuilder _builder;
@@ -192,6 +219,15 @@ namespace Noggit
     QPushButton* _confirmButton = nullptr;
     QPushButton* _cancelButton = nullptr;
     QLabel* _status = nullptr;
+    QLabel* _hint = nullptr;
+    QWidget* _paintBox = nullptr;
+    Ui::current_texture* _paintPreview = nullptr;
+    QComboBox* _paintTextureBox = nullptr;
+    QPushButton* _paintPickButton = nullptr;
+    QDoubleSpinBox* _opacityBox = nullptr;
+    QComboBox* _paintFalloffBox = nullptr;
+    QCheckBox* _eraseBox = nullptr;
+    QCheckBox* _revealBox = nullptr;
     bool _updating = false;
 
     Noggit::Rendering::Primitives::Sphere _sphere;
