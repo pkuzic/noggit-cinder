@@ -131,6 +131,21 @@ vec4 blend(vec2 uv)
        + layer_color(uv, vary_layers.w) * a2;
 }
 
+// Triplanar ground: the top projection is the mesh's own UV (identical to the ADT terrain), the two side
+// projections use world position at the same texels per yard (pos / UNITSIZE). Weights are |n|^4, normalised,
+// so near-flat ground (|n.y| >= ~0.95) is practically pure top-down. Noggit axes: x, up, z; n.x is along z.
+vec4 blend_tri(vec2 top_uv, vec3 n)
+{
+  vec3 w = pow(abs(n), vec3(4.0));
+  w /= (w.x + w.y + w.z);
+  vec4 c = vec4(0.0);
+  float sum = 0.0;
+  if (w.y > 0.0005) { c += blend(top_uv) * w.y; sum += w.y; }
+  if (w.x > 0.0005) { c += blend(vary_position.zy / UNITSIZE) * w.x; sum += w.x; }
+  if (w.z > 0.0005) { c += blend(vary_position.xy / UNITSIZE) * w.z; sum += w.z; }
+  return c / max(sum, 1e-4);
+}
+
 void main()
 {
   float dist_from_camera = distance(camera, vary_position);
@@ -153,7 +168,7 @@ void main()
   vec3 reflection = normalize(normalized_normal - (-LightDir_FogRate.xyz));
   float specularFactor = max(dot(reflection, normalize(camera - vary_position)), 0.0);
 
-  vec4 ground = blend(vary_uv);
+  vec4 ground = blend_tri(vary_uv, normalized_normal);
   float wall = clamp(vary_wall, 0.0, 1.0);
   if (wall > 0.0)
   {
