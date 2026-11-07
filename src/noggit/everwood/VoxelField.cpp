@@ -3,6 +3,7 @@
 // See VoxelField.hpp. Every function names its Rust original (benilla-voxel world.rs / lib.rs,
 // fast-surface-nets 0.2.1). Keep the operation ORDER identical: the golden vectors compare bytes.
 #include <noggit/everwood/VoxelField.hpp>
+#include <noggit/everwood/VoxelPaint3.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -43,7 +44,9 @@ namespace Noggit::Everwood::Voxel
         for (float v : pos)
             if (!std::isfinite(v) || std::fabs(v) >= 40000.0f)
                 return false;
-        return std::isfinite(radius) && radius > 0.0f && radius <= 16.0f && mode <= MODE_MAX;
+        return std::isfinite(radius) && radius > 0.0f && radius <= 16.0f && mode <= MODE_MAX
+            // CONTRACT v3.10: mode 7 caps the radius at 8 yd (8.0 valid, 8.5 invalid)
+            && (mode != MODE_PAINT3 || radius <= PAINT3_MAX_RADIUS);
     }
 
     // world.rs shape_of_param (bits 9-10; 3 = sphere)
@@ -294,6 +297,9 @@ namespace Noggit::Everwood::Voxel
     }
 
     // ---------------------------------------------------------------------------------------- World
+    World::World(HeightFn h) : m_height(std::move(h)), m_paint(std::make_unique<Paint3Map>()) {}
+    World::~World() = default;
+
     std::shared_ptr<ColumnSeed const> World::Seed(ColKey const& col)
     {
         auto it = m_seeds.find(col);
@@ -588,6 +594,15 @@ namespace Noggit::Everwood::Voxel
     // VoxelWorldData::build + VoxelBuildJob::run
     void World::Rebuild(std::vector<Key> const& keys, std::vector<Edit const*> const& edits)
     {
+        RebuildPaint(keys, {}, edits);
+    }
+
+    // VoxelWorldData::build_job_paint + VoxelBuildJob::run_with_paint (CONTRACT v3.10)
+    void World::RebuildPaint(std::vector<Key> const& keys, std::vector<Key> const& paintKeysIn, std::vector<Edit const*> const& edits)
+    {
+        std::vector<Key> paintKeys = paintKeysIn;
+        std::sort(paintKeys.begin(), paintKeys.end());
+        paintKeys.erase(std::unique(paintKeys.begin(), paintKeys.end()), paintKeys.end());
         Chunks set;
         std::vector<Key> live;
         for (Key const& k : keys)
@@ -604,12 +619,35 @@ namespace Noggit::Everwood::Voxel
             set.emplace(k, std::move(d));
             live.push_back(k);
         }
-        if (set.empty())
+        if (set.empty() && paintKeys.empty())
             return;
         // Outside the set: the other active chunks as they are now, else the seed.
         Outside const outside = [this](int32_t x, int32_t y, int32_t z) { return Sample(x, y, z); };
+        std::set<Key> const pset(paintKeys.begin(), paintKeys.end());
+        Paint3Map paint;
         for (Edit const* e : edits)
         {
+            if (IsPaint3(*e))
+            {
+                // A dab in its canonical place: the set's density in lockstep, the rest as it is now.
+                if (pset.empty() || !e->IsValid())
+                    continue;
+                bool touchesPaint = false;
+                for (Key const& k : e->TouchedChunks())
+                    if (pset.count(k)) { touchesPaint = true; break; }
+                if (!touchesPaint)
+                    continue;
+                DensityFn const density = [&set, &outside](int32_t x, int32_t y, int32_t z) -> int8_t
+                {
+                    Key const k{ chunk_of(x), chunk_of(y), chunk_of(z) };
+                    auto it = set.find(k);
+                    if (it != set.end())
+                        return it->second[owned_index(x - k[0] * C, y - k[1] * C, z - k[2] * C)];
+                    return outside(x, y, z);
+                };
+                ApplyDab3(*e, density, paint, [&pset](Key const& k) { return pset.count(k) != 0; });
+                continue;
+            }
             bool touches = false;
             for (Key const& k : live)
                 if (e->Touches(k)) { touches = true; break; }
@@ -618,6 +656,36 @@ namespace Noggit::Everwood::Voxel
         }
         for (auto& kv : set)
             m_chunks[kv.first] = std::move(kv.second);
+        for (Key const& k : paintKeys)
+        {
+            auto it = paint.find(k);
+            if (it == paint.end() || it->second.IsEmpty())
+                m_paint->erase(k);
+            else
+                (*m_paint)[k] = std::move(it->second);
+        }
+    }
+
+    // VoxelWorldData::apply_paint3_incremental
+    std::vector<Key> World::ApplyPaint3(Edit const& e)
+    {
+        return ApplyDab3(e, [this](int32_t x, int32_t y, int32_t z) { return Sample(x, y, z); }, *m_paint);
+    }
+
+    Paint3Map const& World::PaintRef() const
+    {
+        return *m_paint;
+    }
+
+    ChunkPaint3 const* World::PaintOf(Key const& k) const
+    {
+        auto it = m_paint->find(k);
+        return it == m_paint->end() ? nullptr : &it->second;
+    }
+
+    void World::ClearPaint()
+    {
+        m_paint->clear();
     }
 
     std::unordered_set<int32_t> const* World::WantedInColumn(ColKey const& col) const
@@ -631,6 +699,7 @@ namespace Noggit::Everwood::Voxel
         m_seeds.clear();
         m_chunks.clear();
         m_wanted.clear();
+        m_paint->clear();
     }
 
     // VoxelWorldData::window_i8 — own 32^3 + the apron from the owning neighbours (active density, else the
@@ -929,29 +998,121 @@ namespace Noggit::Everwood::Voxel
     }
 
     // --------------------------------------------------------------------------------------- Journal
+    // MapJournal: position i in m_edits is the canonical EditOrder (Noggit has no unconfirmed tail).
     void Journal::Clear()
     {
+        dirtyAllDabs();                             // every dab is dropped: its box goes dirty
         m_edits.clear();
         m_index.clear();
+        m_paint3Index.clear();
+        m_paint3Orders.clear();
+    }
+
+    // index_add, without the dirtying (the caller dirties: it knows which edits come later)
+    void Journal::indexAdd(uint32_t i)
+    {
+        Edit const& e = m_edits[i];
+        if (!e.IsValid())
+            return;
+        if (IsPaint3(e))
+        {
+            for (Key const& k : e.TouchedChunks())
+                m_paint3Index[k].push_back(i);
+            m_paint3Orders.insert(i);
+            return;
+        }
+        if (!e.IsApplied())
+            return;                                 // 4 paint / 5 roughen change no voxel density
+        for (Key const& k : e.TouchedChunks())
+            m_index[k].push_back(i);
+    }
+
+    void Journal::reindexSilently()
+    {
+        m_index.clear();
+        m_paint3Index.clear();
+        m_paint3Orders.clear();
+        for (size_t i = 0; i < m_edits.size(); ++i)
+            indexAdd(uint32_t(i));
+    }
+
+    void Journal::dirtyAllDabs()
+    {
+        for (uint32_t i : m_paint3Orders)
+            for (Key const& k : m_edits[i].TouchedChunks())
+                m_paint3Dirty.insert(k);
+    }
+
+    // dirty_later_dabs: every dab at a position >= firstLater touching the density edit's read closure
+    void Journal::dirtyLaterDabs(uint32_t firstLater, Edit const& e)
+    {
+        if (!e.IsValid() || IsPaint3(e) || !e.IsApplied())
+            return;
+        if (m_paint3Orders.lower_bound(firstLater) == m_paint3Orders.end())
+            return;
+        for (Key const& t : closure(e.TouchedChunks(), false))
+        {
+            auto it = m_paint3Index.find(t);
+            if (it == m_paint3Index.end())
+                continue;
+            for (uint32_t i : it->second)
+                if (i >= firstLater)
+                    for (Key const& k : m_edits[i].TouchedChunks())
+                        m_paint3Dirty.insert(k);
+        }
     }
 
     void Journal::Add(Edit const& e)
     {
-        m_edits.push_back(e);
-        if (e.IsValid())
+        Insert(m_edits.size(), e);
+    }
+
+    void Journal::Insert(size_t pos, Edit const& e)
+    {
+        if (pos > m_edits.size())
+            pos = m_edits.size();
+        m_edits.insert(m_edits.begin() + std::ptrdiff_t(pos), e);
+        if (pos + 1 == m_edits.size())
+            indexAdd(uint32_t(pos));                // appended: the positions of the others are unchanged
+        else
+            reindexSilently();
+        if (!e.IsValid())
+            return;
+        if (IsPaint3(e))
+        {
             for (Key const& k : e.TouchedChunks())
-                m_index[k].push_back(uint32_t(m_edits.size() - 1));
+                m_paint3Dirty.insert(k);
+            return;
+        }
+        dirtyLaterDabs(uint32_t(pos + 1), e);
+    }
+
+    void Journal::Remove(size_t pos)
+    {
+        if (pos >= m_edits.size())
+            return;
+        Edit const e = m_edits[pos];
+        m_edits.erase(m_edits.begin() + std::ptrdiff_t(pos));
+        reindexSilently();
+        if (!e.IsValid())
+            return;
+        if (IsPaint3(e))
+        {
+            for (Key const& k : e.TouchedChunks())
+                m_paint3Dirty.insert(k);
+            return;
+        }
+        dirtyLaterDabs(uint32_t(pos), e);           // the later edits moved down by one
     }
 
     void Journal::Reindex()
     {
-        m_index.clear();
-        for (size_t i = 0; i < m_edits.size(); ++i)
-            if (m_edits[i].IsValid())
-                for (Key const& k : m_edits[i].TouchedChunks())
-                    m_index[k].push_back(uint32_t(i));
+        dirtyAllDabs();                             // the dabs before the change
+        reindexSilently();
+        dirtyAllDabs();                             // and after it
     }
 
+    // edits_for: the density index merged with the mode-7 index by canonical position
     std::vector<Edit const*> Journal::EditsFor(std::vector<Key> const& keys) const
     {
         std::set<uint32_t> ids;
@@ -960,6 +1121,9 @@ namespace Noggit::Everwood::Voxel
             auto it = m_index.find(k);
             if (it != m_index.end())
                 ids.insert(it->second.begin(), it->second.end());
+            auto pt = m_paint3Index.find(k);
+            if (pt != m_paint3Index.end())
+                ids.insert(pt->second.begin(), pt->second.end());
         }
         std::vector<Edit const*> out;
         out.reserve(ids.size());
@@ -970,6 +1134,13 @@ namespace Noggit::Everwood::Voxel
 
     std::set<Key> Journal::ReadClosure(std::vector<Key> const& keys) const
     {
+        return closure(keys, true);
+    }
+
+    // MapJournal::closure: neighbour-reading edits link every chunk they touch; with `paint`, a dab touching a
+    // member also brings the chunks of its box that HAVE DENSITY EDITS.
+    std::set<Key> Journal::closure(std::vector<Key> const& keys, bool paint) const
+    {
         std::set<Key> set(keys.begin(), keys.end());
         std::vector<Key> queue(set.begin(), set.end());
         while (!queue.empty())
@@ -977,19 +1148,69 @@ namespace Noggit::Everwood::Voxel
             Key const k = queue.back();
             queue.pop_back();
             auto it = m_index.find(k);
-            if (it == m_index.end())
+            if (it != m_index.end())
+                for (uint32_t i : it->second)
+                {
+                    Edit const& e = m_edits[i];
+                    if (!e.ReadsNeighbours())
+                        continue;
+                    for (Key const& t : e.TouchedChunks())
+                        if (set.insert(t).second)
+                            queue.push_back(t);
+                }
+            if (!paint)
                 continue;
-            for (uint32_t i : it->second)
-            {
-                Edit const& e = m_edits[i];
-                if (!e.ReadsNeighbours())
-                    continue;
-                for (Key const& t : e.TouchedChunks())
-                    if (set.insert(t).second)
-                        queue.push_back(t);
-            }
+            auto pt = m_paint3Index.find(k);
+            if (pt != m_paint3Index.end())
+                for (uint32_t i : pt->second)
+                    for (Key const& t : m_edits[i].TouchedChunks())
+                        if (m_index.count(t) && set.insert(t).second)
+                            queue.push_back(t);
         }
         return set;
+    }
+
+    std::vector<Edit const*> Journal::Paint3For(Key const& k) const
+    {
+        std::vector<Edit const*> out;
+        auto it = m_paint3Index.find(k);
+        if (it != m_paint3Index.end())
+            for (uint32_t i : it->second)
+                out.push_back(&m_edits[i]);
+        return out;
+    }
+
+    std::vector<Key> Journal::Paint3Keys() const
+    {
+        std::vector<Key> out;
+        out.reserve(m_paint3Index.size());
+        for (auto const& kv : m_paint3Index)
+            out.push_back(kv.first);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    std::set<Key> Journal::TakePaint3Dirty()
+    {
+        std::set<Key> out;
+        out.swap(m_paint3Dirty);
+        return out;
+    }
+
+    std::vector<Key> Journal::IndexedChunks() const
+    {
+        std::vector<Key> out;
+        out.reserve(m_index.size());
+        for (auto const& kv : m_index)
+            out.push_back(kv.first);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    size_t Journal::ChunkEditCount(Key const& k) const
+    {
+        auto it = m_index.find(k);
+        return it == m_index.end() ? 0 : it->second.size();
     }
 
     uint64_t Fnv(void const* data, size_t n, uint64_t h)

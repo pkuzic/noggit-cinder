@@ -189,6 +189,19 @@ ELSE()
   collect_files(noggit_root_sources src/noggit TRUE "*.cpp" "")
 ENDIF()
 
+# Everwood voxel CONTRACT v3.10: the voxel replica must be bit-identical to the Rust reference, so its float
+# maths may never be contracted into FMA. /fp:precise is MSVC's default (no contraction on x64 SSE2); state it
+# explicitly so a global /fp:fast or /fp:contract can never reach these files.
+IF(MSVC)
+  set_source_files_properties(
+    src/noggit/everwood/VoxelField.cpp src/noggit/everwood/VoxelPaint3.cpp src/noggit/everwood/VoxelGolden.cpp
+    PROPERTIES COMPILE_OPTIONS "/fp:precise")
+ELSE()
+  set_source_files_properties(
+    src/noggit/everwood/VoxelField.cpp src/noggit/everwood/VoxelPaint3.cpp src/noggit/everwood/VoxelGolden.cpp
+    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+ENDIF()
+
 collect_files(png_blp_sources src/external/PNG2BLP TRUE "*.c;*.cpp;" "")
 collect_files(imguizmo_sources src/external/imguizmo FALSE "*.c;*.cpp;" "")
 collect_files(imguipiemenu_sources src/external/imguipiemenu FALSE "*.c;*.cpp;" "")

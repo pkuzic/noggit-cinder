@@ -1,13 +1,14 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 //
 // The Everwood voxel field: the same density maths as the game client (benilla-voxel world.rs,
-// CONTRACT v3, v3.3 soft brushes, v3.6 shapes, v3.9 dither + level) so an edit made here lands on
-// exactly the same samples.
+// CONTRACT v3, v3.3 soft brushes, v3.6 shapes, v3.9 dither + level, v3.10 3D paint) so an edit made here
+// lands on exactly the same samples. The mode-7 3D paint maths lives in VoxelPaint3.hpp; the journal index
+// and the world-level paint store are here.
 // Ported from the server replica MonkeyVoxelField, which itself names its Rust originals; the Rust
 // sources are Apache-2.0 / MIT, see EVERWOOD-MODE.md.
 //
 // Pure C++ with no Noggit, Qt or OpenGL headers: the standalone golden-vector test compiles this very
-// file (voxel-core/golden-v3.9.txt).
+// file (voxel-core/golden-v3.10.txt).
 //
 // Determinism: every op is float (never double), x*x for powi(2), std::sqrt on float, std::round (half
 // away from zero == Rust f32::round), clamp, cast. MSVC x64 /fp:precise uses SSE2 and contracts no FMA.
@@ -81,7 +82,10 @@ namespace Noggit::Everwood::Voxel
   // CONTRACT v3.9: 6 = level with a soft bank (param: i12 plane offset cm, bits 12-13 bank slope, bits
   // 14-15 core size), see world.rs MODE_LEVEL / LevelBrush. Applied like 0-3.
   constexpr uint8_t MODE_LEVEL = 6;
-  constexpr uint8_t MODE_MAX = 6;
+  // CONTRACT v3.10: 7 = 3D voxel paint "PAINT3" (VoxelPaint3.hpp; world.rs MODE_PAINT3). Valid only with
+  // radius <= 8 yd; journalled + indexed per voxel chunk, never applied to density.
+  constexpr uint8_t MODE_PAINT3 = 7;
+  constexpr uint8_t MODE_MAX = MODE_PAINT3;
   constexpr uint16_t SOFT_FLAG = 0x8000;
   // CONTRACT v3.9: soft param bits 11-14 = rounding field; 0x4000 = dithered rounding.
   constexpr uint16_t ROUND_MASK = 0x7800;
@@ -127,7 +131,7 @@ namespace Noggit::Everwood::Voxel
     uint16_t param = 0;
 
     bool IsValid() const;
-    bool IsApplied() const { return mode <= MODE_FLATTEN || mode == MODE_LEVEL; }
+    bool IsApplied() const { return mode <= MODE_FLATTEN || mode == MODE_LEVEL; }   // 4 / 5 / 7: never density
     bool Soft(SoftBrush& b) const { return mode <= MODE_SMOOTH && SoftBrush::FromParam(param, b); }
     bool Dithered() const { SoftBrush b; return Soft(b) && (param & ROUND_MASK) == ROUND_DITHER; }   // v3.9
     uint32_t DitherSeed() const;                // v3.9 world.rs dither_seed
@@ -166,6 +170,8 @@ namespace Noggit::Everwood::Voxel
   };
 
   using Density = std::vector<int8_t>;            // OWNED samples, x fastest
+  class ChunkPaint3;                              // VoxelPaint3.hpp
+  using Paint3Map = std::unordered_map<Key, ChunkPaint3, KeyHash>;
   using Chunks = std::unordered_map<Key, Density, KeyHash>;
   using Outside = std::function<int8_t(int32_t, int32_t, int32_t)>;
 
@@ -177,7 +183,10 @@ namespace Noggit::Everwood::Voxel
   class World
   {
   public:
-    explicit World(HeightFn h) : m_height(std::move(h)) {}
+    explicit World(HeightFn h);
+    ~World();
+    World(World const&) = delete;
+    World& operator=(World const&) = delete;
 
     std::shared_ptr<ColumnSeed const> Seed(ColKey const& col);       // creates on demand
     int8_t Sample(int32_t x, int32_t y, int32_t z);                 // chunk -> seed
@@ -193,6 +202,23 @@ namespace Noggit::Everwood::Voxel
     // lockstep, reading other active chunks / seeds outside the set.
     void Rebuild(std::vector<Key> const& keys, std::vector<Edit const*> const& edits);
 
+    // CONTRACT v3.10 (world.rs build_job_paint + run_with_paint): Rebuild that ALSO replays the 3D paint of
+    // `paintKeys` - every valid mode-7 dab of `edits` touching a paint key is applied at its canonical place,
+    // reading the set's density in lockstep and everything else as it is now (active density, else the
+    // seed). The results REPLACE the store's paint of every paint key (unpainted = removed). Exact iff
+    // `edits` = Journal::EditsFor(closure) and `keys` = the active members of Journal::ReadClosure(...) of
+    // the paint keys (see Journal). Paint keys need not be active (paint-only chunks are never activated).
+    void RebuildPaint(std::vector<Key> const& keys, std::vector<Key> const& paintKeys, std::vector<Edit const*> const& edits);
+
+    // world.rs apply_paint3_incremental: apply mode-7 dab `e` to the store reading the LIVE field (exact
+    // when `e` is the newest edit in canonical order). Returns the chunks it applied to, sorted.
+    std::vector<Key> ApplyPaint3(Edit const& e);
+
+    // The world-level 3D paint store (painted chunks only).
+    Paint3Map const& PaintRef() const;
+    ChunkPaint3 const* PaintOf(Key const& k) const;
+    void ClearPaint();
+
     void Window(Key const& k, int8_t* out /*WINDOW*/);              // 34^3 mesh window
     void WindowSeedHeights(Key const& k, float* out /*SAMPLES^2*/); // seeded surface under the window
 
@@ -203,7 +229,7 @@ namespace Noggit::Everwood::Voxel
     size_t SeedCount() const { return m_seeds.size(); }
     std::unordered_set<int32_t> const* WantedInColumn(ColKey const& col) const;
 
-    // Drop every seed and density (the terrain under the field changed).
+    // Drop every seed, density and 3D paint (the terrain under the field changed).
     void Clear();
 
   private:
@@ -211,6 +237,7 @@ namespace Noggit::Everwood::Voxel
     std::unordered_map<ColKey, std::shared_ptr<ColumnSeed const>, ColHash> m_seeds;
     Chunks m_chunks;
     std::unordered_map<ColKey, std::unordered_set<int32_t>, ColHash> m_wanted;   // column -> active kz
+    std::unique_ptr<Paint3Map> m_paint;            // CONTRACT v3.10: chunk -> its 3D paint (painted only)
   };
 
   // fast-surface-nets 0.2.1 port (no normals in the hash; the eval-max-plane feature off, as benilla
@@ -237,26 +264,54 @@ namespace Noggit::Everwood::Voxel
   // world.rs chunks_hash: FNV over the chunks in key order (key as i32 LE, then the density bytes).
   uint64_t ChunksHash(Chunks const& chunks);
 
-  // world.rs MapJournal: edits in canonical order with a per-chunk index, and the rebuild closure.
+  // world.rs MapJournal: edits in canonical order (the vector position is the EditOrder) with a per-chunk
+  // index, the CONTRACT v3.10 mode-7 index and the rebuild closure.
+  //   index        = every valid APPLIED edit (0-3, 6) under each chunk of its box (has_density);
+  //   paint3 index = every valid mode-7 dab under each chunk of its box (4 / 5 are indexed nowhere here).
+  // 3D paint dirtying (take_paint3_dirty): a dab filed / dropped dirties its box; a density edit filed /
+  // dropped at position o dirties the boxes of every dab LATER than o touching the edit's neighbour-read
+  // closure. Rebuild recipe: closure = ReadClosure(dirty), density keys = its active members, paint keys =
+  // dirty, World::RebuildPaint(density keys, dirty, EditsFor(closure)).
   class Journal
   {
   public:
-    void Clear();
+    void Clear();                               // drops every edit (every dab's box goes dirty)
     void Add(Edit const& e);                    // appended in canonical order (seq ascending)
+    void Insert(size_t pos, Edit const& e);     // filed at canonical position `pos` (out of order)
+    void Remove(size_t pos);                    // dropped (undo / revert)
     std::vector<Edit> const& Edits() const { return m_edits; }
     std::vector<Edit>& MutableEdits() { return m_edits; }
-    void Reindex();                             // after MutableEdits() was changed
-    // Every edit touching any of `keys`, in canonical order, each once.
+    void Reindex();                             // after MutableEdits() was changed (every dab's box dirty)
+    // Every edit touching any of `keys` (density edits + mode-7 dabs merged), canonical order, each once.
     std::vector<Edit const*> EditsFor(std::vector<Key> const& keys) const;
-    // read_closure: `keys` grown by every chunk linked through a neighbour-reading edit. Sorted.
+    // read_closure: `keys` grown by every chunk linked through a neighbour-reading edit, and (v3.10) by the
+    // chunks WITH DENSITY EDITS of every dab touching a member, transitively. Sorted.
     std::set<Key> ReadClosure(std::vector<Key> const& keys) const;
 
+    // CONTRACT v3.10
+    std::vector<Edit const*> Paint3For(Key const& k) const;   // the valid dabs touching k, canonical order
+    std::vector<Key> Paint3Keys() const;                      // every chunk some dab touches, sorted
+    std::set<Key> TakePaint3Dirty();                          // drained
+    bool HasDensity(Key const& k) const { return m_index.count(k) != 0; }
+    std::vector<Key> IndexedChunks() const;                   // density-indexed chunks, sorted
+    size_t ChunkEditCount(Key const& k) const;
+
   private:
+    void indexAdd(uint32_t i);
+    void reindexSilently();
+    std::set<Key> closure(std::vector<Key> const& keys, bool paint) const;
+    void dirtyLaterDabs(uint32_t firstLater, Edit const& e);   // dabs at positions >= firstLater
+    void dirtyAllDabs();
+
     std::vector<Edit> m_edits;
-    std::unordered_map<Key, std::vector<uint32_t>, KeyHash> m_index;
+    std::unordered_map<Key, std::vector<uint32_t>, KeyHash> m_index;        // ascending positions
+    std::unordered_map<Key, std::vector<uint32_t>, KeyHash> m_paint3Index;  // ascending positions
+    std::set<uint32_t> m_paint3Orders;                                      // positions of indexed dabs
+    std::set<Key> m_paint3Dirty;
   };
 
-  // Golden-vector check against voxel-core/golden-v3.6.txt (see VoxelGolden.cpp). Returns true when every
-  // chunk, mesh, height and hash line matches; `report` receives a summary and the first differences.
+  // Golden-vector check against voxel-core/golden-v3.10.txt (or v3.9 / v3.6, see VoxelGolden.cpp). Returns
+  // true when every chunk, mesh, height, hash and (v3.10) paint3 line matches; `report` receives a summary
+  // and the first differences.
   bool RunGolden(char const* path, std::string& report);
 }
