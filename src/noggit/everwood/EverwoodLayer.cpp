@@ -220,12 +220,25 @@ namespace Noggit::Everwood
   // ----------------------------------------------------------------------------------------- the journal
   uint16_t EverwoodLayer::beginStroke()
   {
-    // CONTRACT 9.4: starting a new stroke makes the previously undone strokes non-redoable.
-    _entries.erase(std::remove_if(_entries.begin(), _entries.end(), [](Entry const& e) { return e.undone; }), _entries.end());
-
-    uint16_t const id = _nextStroke;
-    _nextStroke = _nextStroke == 65535 ? 1 : uint16_t(_nextStroke + 1);
+    // An undo step finds its edits by stroke id, so a new stroke never takes an id that an edit still carries:
+    // one loaded from the journal (a previous session's, or a hand-merged file whose nextStroke is behind its
+    // edits) or one undone and still redoable. Only after the 65535 wrap can that happen with a sane file.
+    std::vector<bool> used(65536, false);
+    for (Entry const& e : _entries)
+      used[e.edit.stroke] = true;
+    uint16_t id = _nextStroke == 0 ? 1 : _nextStroke;
+    for (int tries = 0; used[id] && tries < 65535; ++tries)
+      id = id == 65535 ? 1 : uint16_t(id + 1);
+    _nextStroke = id == 65535 ? 1 : uint16_t(id + 1);
     return id;
+  }
+
+  void EverwoodLayer::dropUndone()
+  {
+    // CONTRACT 9.4: a new stroke makes the previously undone strokes non-redoable. Called when the stroke opens
+    // its undo step, the moment Noggit's action history drops its redo steps: a stroke that leaves no undo step
+    // (every paint dab refused) keeps both, so redo still finds the strokes it brings back.
+    _entries.erase(std::remove_if(_entries.begin(), _entries.end(), [](Entry const& e) { return e.undone; }), _entries.end());
   }
 
   void EverwoodLayer::addEdit(Edit edit, uint16_t stroke)

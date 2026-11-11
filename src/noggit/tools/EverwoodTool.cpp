@@ -818,7 +818,13 @@ namespace Noggit
   // ------------------------------------------------------------------------------------------- strokes
   void EverwoodTool::openAction(int modality)
   {
+    // One stroke, one undo step: beginAction hands back an action that is still open (a previous stroke's,
+    // closed only on the next tick), and the stroke would join its undo step.
+    if (NOGGIT_CUR_ACTION)
+      NOGGIT_ACTION_MGR->endAction();
     Action* action = NOGGIT_ACTION_MGR->beginAction(mapView(), ActionFlags::eEVERWOOD_VOXEL, modality);
+    // beginAction dropped Noggit's redo steps; the layer drops the strokes they would have brought back.
+    _layer->dropUndone();
     action->addFlags(ActionFlags::eEVERWOOD_VOXEL);
     std::weak_ptr<EverwoodLayer> weak = _layer;
     uint16_t const stroke = _strokeId;

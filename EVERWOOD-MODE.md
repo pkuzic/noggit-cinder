@@ -176,6 +176,17 @@ smooth|linear|flat`, `set erase 0|1`, `set reveal 0|1`; `paint_ray ox oy oz dx d
 last edit's position), `paint_rel ...` (paint_ray from the anchor), `camera_anchor dist height [side]`,
 `camera_look cx cy cz tx ty tz` (both relative to the anchor), `expect_painted [>]n`, `phash_save <name>`,
 `phash_same <name>`, `phash_differs <name>`; `status` also prints the painted chunks and the paint hash.
+`seed_journal <file> [MapDirectory]` (before `map`; default `Azeroth`) makes the project's `.mvoxj` a copy of
+`<file>`, so a script can start from the edits a previous session left behind.
+
+Only the script drives the window: real mouse, wheel, key, tablet and touch input from the desktop is ignored
+during a smoke run (a click on that screen would otherwise start a stroke between the scripted ones and shift every
+undo after it). When any arrived, the result file says so before `RESULT` (`note: ignored real desktop input`).
+
+Undo, a stroke at a time: every stroke that changes something is one step of Noggit's action history. A new stroke
+never reuses the id of an edit still in the journal (loaded or undone). The undone strokes stop being redoable when
+the next stroke opens its undo step, together with Noggit's own redo steps; a stroke that leaves no step (every
+paint dab refused) leaves redo alone.
 
 ## WMO scale
 

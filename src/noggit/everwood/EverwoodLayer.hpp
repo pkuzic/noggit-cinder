@@ -68,8 +68,10 @@ namespace Noggit::Everwood
     EverwoodLayer& operator=(EverwoodLayer const&) = delete;
 
     // ---- edits
-    // A new stroke id (1..65535, wraps). Strokes that were undone can no longer be redone (CONTRACT 9.4).
+    // A new stroke id (1..65535, wraps), never one that a loaded, live or undone edit still carries.
     uint16_t beginStroke();
+    // The undone strokes can no longer be redone (CONTRACT 9.4). Call when a stroke opens its undo step.
+    void dropUndone();
     // Stamps seq, nonce, stroke and map, journals and applies. Invalid edits are dropped.
     void addEdit(Voxel::Edit edit, uint16_t stroke);
     void endStroke();

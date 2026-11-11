@@ -114,8 +114,44 @@ namespace Noggit::Everwood
           _lines.push_back(line);
       }
 
+      // Only the script drives this window. A click or key from the desktop (the owner at work, another
+      // session's automation on the same screen) would start a real stroke between the scripted ones and
+      // shift every undo / redo after it; the script's own events are sent, never spontaneous.
+      qApp->installEventFilter(this);
+
       connect(&_timer, &QTimer::timeout, this, [this] { step(); });
       _timer.start(20);
+    }
+
+  protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+      if (!event->spontaneous())
+        return QObject::eventFilter(watched, event);
+      switch (event->type())
+      {
+      case QEvent::MouseButtonPress:
+      case QEvent::MouseButtonDblClick:
+      case QEvent::KeyPress:
+      case QEvent::TabletPress:
+      case QEvent::TouchBegin:
+        ++_realPresses;
+        return true;
+      case QEvent::MouseButtonRelease:
+      case QEvent::MouseMove:
+      case QEvent::Wheel:
+      case QEvent::KeyRelease:
+      case QEvent::ShortcutOverride:
+      case QEvent::TabletMove:
+      case QEvent::TabletRelease:
+      case QEvent::TouchUpdate:
+      case QEvent::TouchEnd:
+      case QEvent::ContextMenu:
+        ++_realOther;
+        return true;
+      default:
+        return QObject::eventFilter(watched, event);
+      }
     }
 
   private:
@@ -131,6 +167,9 @@ namespace Noggit::Everwood
 
     [[noreturn]] void finish(int code)
     {
+      if (_realPresses || _realOther)
+        report("note: ignored real desktop input: " + std::to_string(_realPresses) + " presses, "
+               + std::to_string(_realOther) + " other events");
       report(code == 0 && !_failed ? "RESULT PASS" : "RESULT FAIL");
       // Ends here on purpose: a smoke run has nothing to save, and a normal shutdown would ask
       // about unsaved work on a window nobody is watching.
@@ -269,6 +308,22 @@ namespace Noggit::Everwood
         OpenGL::context::scoped_setter const _(::gl, _view->context());
         world->mapIndex.saveChanged(world);
         report("saved changed tiles");
+      }
+      else if (cmd == "seed_journal")
+      {
+        // seed_journal <file> [MapDirectory]: before `map`, the project's voxel journal becomes a copy of <file>
+        // (edits a previous session left behind). Default map directory: Azeroth.
+        if (!_project)
+        {
+          report("FAIL seed_journal needs a project");
+          finish(9);
+        }
+        QString const map = a.size() > 2 ? a.value(2) : QString("Azeroth");
+        QDir const dir(QString::fromStdString(_project->ProjectPath) + "/everwood/voxels");
+        dir.mkpath(".");
+        QString const target = dir.absoluteFilePath(map + ".mvoxj");
+        QFile::remove(target);
+        expect(QFile::copy(a.value(1), target), "seed_journal " + a.value(1).toStdString() + " -> " + target.toStdString());
       }
       else if (cmd == "report")
       {
@@ -849,6 +904,8 @@ namespace Noggit::Everwood
     MapView* _view = nullptr;
     int _map_id = 0;
     Qt::MouseButtons _held = Qt::NoButton;
+    std::size_t _realPresses = 0;
+    std::size_t _realOther = 0;
     float _scratch = 0.f;
     glm::vec3 _anchor{ 0.f };
     std::map<std::string, std::string> _hashes;
