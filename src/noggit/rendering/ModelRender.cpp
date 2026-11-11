@@ -764,6 +764,17 @@ void ModelRender::initRenderPasses(ModelView const* view, ModelTexUnit const* te
     pass.vertex_start = model_geosets[geoset].vstart;
     pass.vertex_end = pass.vertex_start + model_geosets[geoset].vcount;
 
+    // Vanilla (v256/257) batches are not WotLK shader ids: the 1.12 client derives the shader from
+    // the material blend mode. 59 batches in the 1.12 data carry a raw value with bit 0x8000 set
+    // (0xFFFF on every Elwynn/Stranglethorn/Orgrimmar waterfall), which the WotLK path below reads
+    // as a "special" combo, finds no pixel shader for, and never draws (transparent waterfalls).
+    // Clear it so fixShaderIdBlendOverride computes the shader from the blend mode like every other
+    // vanilla batch.
+    if (_model->is_classic_m2() && (pass.shader_id & 0x8000))
+    {
+      pass.shader_id = 0;
+    }
+
     _render_passes.push_back(std::move(pass));
   }
 
