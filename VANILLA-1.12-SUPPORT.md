@@ -230,6 +230,30 @@ in `AsyncLoader::process`) also swallows ACCESS VIOLATIONS — a crashed parse c
 a mere "failed load" while leaving corrupted state behind. The first-chance-AV minidump in
 `error_handling.cpp` exists to make such swallowed faults visible.
 
+## Everwood water flow (MCLQ flow slots)
+
+Everwood mode's panel has a **Water flow** tool (Tool combo, `EverwoodTool::Kind::Flow`) that authors a
+river/sea current into the `SWFlowv` slots every vanilla MCLQ layer already carries. The byte layout and
+what the client does with it are fixed in **`EVERWOOD-WATER-FLOW.md`** (the contract) - read that first.
+
+- **Data**: flow is stored per chunk on `ChunkWater` (`n_flowvs` + `flowvs[2]`). `from_mclq` takes the
+  first layer with `n_flowvs` 1..2 and drops slots that break the reader rules (non-finite, radius <= 0,
+  |dir| < 0.01, |pos| > 1e6); stock tiles (`n_flowvs == 0`, FLT_MAX junk in the slots) load as no flow.
+  `save_mclq` writes the chunk's flow into EVERY MCLQ layer of the chunk (unused slots zero). The MH2O
+  (WotLK) path is untouched. The flow is part of the `ChunkWaterState` undo snapshot.
+- **Coordinates**: slot `pos`/`dir` are WoW world coordinates (x north, y west, z up); the editor converts
+  with `wowToNoggit`/`noggitToWow` (`(ZEROPOINT - wow.y, wow.z, ZEROPOINT - wow.x)`).
+- **Tool**: radius 2..100 yd (default 16), velocity 0..8 yd/s (1.5), turbulence 0..1 (0.5), Paint / Erase.
+  Paint: hold the left mouse and drag over water; the horizontal drag direction (samples < 0.5 yd are
+  ignored) becomes `flowvs[0]` of every chunk with water inside the brush (`pos` = brush centre at water
+  height, `frequency` 0). Erase sets `n_flowvs = 0`. One stroke = one undo step, touched tiles are marked
+  changed, and a `[everwood-flow] painted N chunks ...` line goes to the log.
+- **Overlay**: while the Flow kind is selected, a light-blue arrow (length 4 + velocity*2 yd) is drawn at
+  each flow point of the loaded chunks, plus the brush circle. The voxel-journal buttons (Undo/Redo stroke, Export, Re-seed) are hidden for this kind:
+  a flow stroke is an ordinary Noggit action (Ctrl+Z) and is saved with the tile (Ctrl+S).
+- **Check a saved tile**: `py -3 G:\mangos\check_everwood_flow.py <tile.adt>` prints every
+  chunk's `n_flowvs` and slots.
+
 ## Known limitations / follow-ups
 - **Lighting/sky is partial**: `LightParams`/`LightSkybox` don't exist in 1.12 and `Sky.cpp`'s
   zone-light load is WOTLK-gated. Terrain/models render; ambient sky may be flat. Not a crash.

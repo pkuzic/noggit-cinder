@@ -10,6 +10,7 @@
 #include <util/sExtendableArray.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 ChunkWater::ChunkWater(MapChunk* chunk, TileWater* water_tile, float x, float z, bool use_mclq_green_lava)
   : xbase(x)
@@ -23,9 +24,62 @@ ChunkWater::ChunkWater(MapChunk* chunk, TileWater* water_tile, float x, float z,
 {
 }
 
+namespace
+{
+  // EVERWOOD-WATER-FLOW.md reader rules: finite values, radius > 0, |dir| >= 0.01, |pos| <= 1e6.
+  bool valid_flow_slot(mclq_flowvs const& f)
+  {
+    float const all[] = { f.pos[0], f.pos[1], f.pos[2], f.radius, f.dir[0], f.dir[1], f.dir[2]
+                        , f.velocity, f.amplitude, f.frequency };
+    for (float v : all)
+    {
+      if (!std::isfinite(v))
+        return false;
+    }
+    if (f.radius <= 0.f)
+      return false;
+    if (std::sqrt(f.dir[0] * f.dir[0] + f.dir[1] * f.dir[1] + f.dir[2] * f.dir[2]) < 0.01f)
+      return false;
+    return std::abs(f.pos[0]) <= 1e6f && std::abs(f.pos[1]) <= 1e6f && std::abs(f.pos[2]) <= 1e6f;
+  }
+}
+
+void ChunkWater::setFlow(mclq_flowvs const& slot0)
+{
+  _flowvs[0] = slot0;
+  _flowvs[1] = mclq_flowvs{};
+  _n_flowvs = 1;
+}
+
+void ChunkWater::clearFlow()
+{
+  _n_flowvs = 0;
+  _flowvs[0] = mclq_flowvs{};
+  _flowvs[1] = mclq_flowvs{};
+}
+
 void ChunkWater::from_mclq(std::vector<mclq>& layers)
 {
   glm::vec3 pos(xbase, 0.0f, zbase);
+
+  // Flow: the first layer with n_flowvs 1..2 wins; invalid slots are dropped (stock tiles have 0).
+  clearFlow();
+  for (mclq const& liquid : layers)
+  {
+    if (liquid.n_flowvs < 1 || liquid.n_flowvs > 2)
+      continue;
+    std::uint32_t kept = 0;
+    for (std::uint32_t i = 0; i < liquid.n_flowvs; ++i)
+    {
+      if (valid_flow_slot(liquid.flowvs[i]))
+        _flowvs[kept++] = liquid.flowvs[i];
+    }
+    if (kept)
+    {
+      _n_flowvs = kept;
+      break;
+    }
+  }
 
   for (mclq& liquid : layers)
   {
@@ -234,7 +288,12 @@ void ChunkWater::save_mclq(util::sExtendableArray& adt, int mcnk_pos, int& curre
         break;
       }
 
-      mclq_layers.push_back({ layer.to_mclq(attributes), layer.mclq_flag_ordering() });
+      mclq out = layer.to_mclq(attributes);
+      // every MCLQ layer of the chunk carries the chunk's flow; unused slots stay zero
+      out.n_flowvs = _n_flowvs;
+      for (int i = 0; i < 2; ++i)
+        out.flowvs[i] = static_cast<std::uint32_t>(i) < _n_flowvs ? _flowvs[i] : mclq_flowvs{};
+      mclq_layers.push_back({ out, layer.mclq_flag_ordering() });
     }
 
     auto cmp = [](std::pair<mclq, int> const& a, std::pair<mclq, int> const& b)
@@ -581,7 +640,11 @@ MH2O_Attributes& ChunkWater::getAttributes()
 
 ChunkWaterState ChunkWater::getState() const
 {
-  return {_layers, attributes, _auto_update_attributes};
+  ChunkWaterState state{_layers, attributes, _auto_update_attributes};
+  state.n_flowvs = _n_flowvs;
+  state.flowvs[0] = _flowvs[0];
+  state.flowvs[1] = _flowvs[1];
+  return state;
 }
 
 void ChunkWater::restoreState(ChunkWaterState const& state)
@@ -594,6 +657,9 @@ void ChunkWater::restoreState(ChunkWaterState const& state)
   for (auto& layer : _layers)
     layer.setChunk(this);
   attributes = state.attributes;
+  _n_flowvs = state.n_flowvs;
+  _flowvs[0] = state.flowvs[0];
+  _flowvs[1] = state.flowvs[1];
 
   // Rebuild render/extents data without replacing the restored masks.
   _auto_update_attributes = false;

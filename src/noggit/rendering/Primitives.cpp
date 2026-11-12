@@ -9,6 +9,7 @@
 
 #include <glm/gtc/constants.hpp>
 
+#include <algorithm>
 #include <array>
 #include <vector>
 
@@ -556,10 +557,32 @@ void Square::setup_buffers()
   }
 
 
+  void Line::drawSegments(glm::mat4x4 const& mvp, std::vector<glm::vec3> const& points, glm::vec4 const& color)
+  {
+      size_t const n = std::min<size_t>(points.size(), 65534) & ~size_t(1);
+      if (n < 2)
+          return;
+
+      setup_buffers(std::vector<glm::vec3>(points.begin(), points.begin() + n));
+
+      OpenGL::Scoped::use_program line_shader{ *_program.get() };
+
+      line_shader.uniform("model_view_projection", mvp);
+      line_shader.uniform("color", color);
+
+      OpenGL::Scoped::vao_binder const _(_vao[0]);
+      gl.drawElements(GL_LINES, _indices_vbo, _indice_count, GL_UNSIGNED_SHORT, nullptr);
+  }
+
   void Line::setup_buffers(std::vector<glm::vec3> const points)
   {
-      _vao.upload();
-      _buffers.upload();
+      // upload() generates NEW GL names every call; a line redrawn every frame (Everwood flow arrows) leaked
+      // a VAO + 2 buffers per frame. Generate once, then only refill the data.
+      if (!_buffers_are_setup)
+      {
+          _vao.upload();
+          _buffers.upload();
+      }
 
       std::vector<glm::vec3> vertices = points;
       std::vector<std::uint16_t> indices;
@@ -637,12 +660,15 @@ void Square::setup_buffers()
   void Line::setup_shader(std::vector<glm::vec3> vertices, std::vector<std::uint16_t> indices)
   {
       _indice_count = (int)indices.size();
-      _program.reset(new OpenGL::program(
-          {
-              { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("line_vs") },
-              { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("line_fs") }
-          }
-      ));
+      if (!_program)
+      {
+          _program.reset(new OpenGL::program(
+              {
+                  { GL_VERTEX_SHADER, OpenGL::shader::src_from_qrc("line_vs") },
+                  { GL_FRAGMENT_SHADER, OpenGL::shader::src_from_qrc("line_fs") }
+              }
+          ));
+      }
 
       gl.bufferData<GL_ARRAY_BUFFER, glm::vec3>(_vertices_vbo, vertices, GL_STATIC_DRAW);
       gl.bufferData<GL_ELEMENT_ARRAY_BUFFER, std::uint16_t>(_indices_vbo, indices, GL_STATIC_DRAW);

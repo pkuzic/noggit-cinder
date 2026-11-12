@@ -5,6 +5,7 @@
 #include <noggit/MapHeaders.h>
 #include <noggit/tool_enums.hpp>
 
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -24,6 +25,9 @@ struct ChunkWaterState
   std::vector<liquid_layer> layers;
   MH2O_Attributes attributes;
   bool auto_update_attributes = true;
+  // Everwood water flow (EVERWOOD-WATER-FLOW.md), per chunk; carried through undo/redo.
+  std::uint32_t n_flowvs = 0;
+  mclq_flowvs flowvs[2] = {};
 };
 
 namespace BlizzardArchive
@@ -129,6 +133,13 @@ public:
   bool clearFishableAttributesOutsideLiquid();
   bool regenerateAttributes();
 
+  // Everwood water flow (EVERWOOD-WATER-FLOW.md): per chunk, written into every MCLQ layer of the
+  // chunk on save. Positions / directions are WoW world coordinates. MH2O is not touched.
+  std::uint32_t flowCount() const { return _n_flowvs; }
+  mclq_flowvs const& flowSlot(int i) const { return _flowvs[i]; }
+  void setFlow(mclq_flowvs const& slot0);  // one flow point (n_flowvs = 1)
+  void clearFlow();                        // n_flowvs = 0, slots zeroed
+
   float xbase, zbase;
 
   int layer_count() const;
@@ -148,6 +159,9 @@ private:
   int resolve_layer(int target_layer, std::uint64_t surface_token) const;
   // Union of every layer's covered-subchunk mask (Azure port).
   std::uint64_t liquidCellMask() const;
+
+  std::uint32_t _n_flowvs = 0;
+  mclq_flowvs _flowvs[2] = {};
 
   bool _auto_update_attributes = true;
   // updates attributes for all layers

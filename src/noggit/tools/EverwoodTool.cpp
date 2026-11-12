@@ -4,8 +4,13 @@
 
 #include <noggit/Action.hpp>
 #include <noggit/ActionManager.hpp>
+#include <noggit/ChunkWater.hpp>
+#include <noggit/MapChunk.h>
+#include <noggit/MapTile.h>
 #include <noggit/MapView.h>
+#include <noggit/TileWater.hpp>
 #include <noggit/World.h>
+#include <noggit/World.inl>
 #include <noggit/Log.h>
 #include <noggit/everwood/PaintPalette.hpp>
 #include <noggit/everwood/VoxelPaint3.hpp>
@@ -34,6 +39,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <unordered_set>
 
 namespace Noggit
 {
@@ -70,6 +76,11 @@ namespace Noggit
     {
       return { e.pos[0], e.pos[1], e.pos[2] };
     }
+
+    // Water flow limits (EVERWOOD-WATER-FLOW.md): velocity 0..8 yd/s, turbulence 0..1.
+    constexpr float FLOW_MIN_STEP = 0.5f;    // drag samples shorter than this (yd) are ignored
+    constexpr float FLOW_RADIUS_MIN = 2.f;
+    constexpr float FLOW_RADIUS_MAX = 100.f;
 
     // CONTRACT v3.10 paint (caves): the tool's limits (eme tools/paint.rs; the 8 yd cap is mode 7's validity).
     constexpr float PAINT_RADIUS_MIN = 0.5f;
@@ -263,6 +274,8 @@ namespace Noggit
 
   float EverwoodTool::brushRadius() const
   {
+    if (_kind == Kind::Flow)
+      return _flowRadius;
     return _kind == Kind::Bridge ? _bridgeRadius : (_kind == Kind::Paint ? _paintRadius : _radius);
   }
 
@@ -303,7 +316,7 @@ namespace Noggit
       return box;
     };
 
-    _kindBox = combo({ "Sculpt", "Flatten", "Bridge / Tunnel", "Paint (caves)" });
+    _kindBox = combo({ "Sculpt", "Flatten", "Bridge / Tunnel", "Paint (caves)", "Water flow" });
     _modeBox = combo({ "Lower / Dig", "Raise / Build", "Smooth", "Push out", "Pull in" });
     _radiusBox = spin(0.5, 16.0, 0.5, _radius);
     _strengthBox = spin(1.0, 100.0, 1.0, _strength, 0);
@@ -366,6 +379,28 @@ namespace Noggit
     paintForm->addRow(paintHelp);
     outer->addWidget(_paintBox);
 
+    // Water flow: EVERWOOD-WATER-FLOW.md. Written into the ADT's own MCLQ layers (saved with the ADT).
+    _flowBox = new QWidget(_panel);
+    auto* flowColumn = new QVBoxLayout(_flowBox);
+    flowColumn->setContentsMargins(0, 0, 0, 0);
+    auto* flowForm = new QFormLayout();
+    flowForm->setContentsMargins(0, 0, 0, 0);
+    flowColumn->addLayout(flowForm);
+    _flowModeBox = combo({ "Paint", "Erase" });
+    _flowRadiusBox = spin(FLOW_RADIUS_MIN, FLOW_RADIUS_MAX, 1.0, _flowRadius, 0);
+    _flowVelocityBox = spin(0.0, 8.0, 0.1, _flowVelocity, 1);
+    _flowTurbulenceBox = spin(0.0, 1.0, 0.05, _flowTurbulence, 2);
+    flowForm->addRow("Mode", _flowModeBox);
+    flowForm->addRow("Radius (yd)", _flowRadiusBox);
+    flowForm->addRow("Velocity (yd/s)", _flowVelocityBox);
+    flowForm->addRow("Turbulence", _flowTurbulenceBox);
+    auto* flowHelp = new QLabel("Drag over water to paint its current (arrows); Erase clears it. "
+                                "Stored in the ADT, not the voxel journal: Ctrl+S saves it, Ctrl+Z undoes it.", _flowBox);
+    flowHelp->setWordWrap(true);
+    // a word-wrapped label in a QFormLayout row gets one line of height: the text was cut off
+    flowColumn->addWidget(flowHelp);
+    outer->addWidget(_flowBox);
+
     _bridgeLabel = new QLabel(_panel);
     _bridgeLabel->setWordWrap(true);
     outer->addWidget(_bridgeLabel);
@@ -376,19 +411,24 @@ namespace Noggit
     bridgeRow->addWidget(_cancelButton);
     outer->addLayout(bridgeRow);
 
+    // The voxel journal's buttons; hidden for Water flow (its strokes are ordinary Noggit actions: Ctrl+Z).
+    _voxelButtons = new QWidget(_panel);
+    auto* voxelButtons = new QVBoxLayout(_voxelButtons);
+    voxelButtons->setContentsMargins(0, 0, 0, 0);
     auto* undoRow = new QHBoxLayout();
-    auto* undoButton = new QPushButton("Undo stroke", _panel);
-    auto* redoButton = new QPushButton("Redo stroke", _panel);
+    auto* undoButton = new QPushButton("Undo stroke", _voxelButtons);
+    auto* redoButton = new QPushButton("Redo stroke", _voxelButtons);
     undoRow->addWidget(undoButton);
     undoRow->addWidget(redoButton);
-    outer->addLayout(undoRow);
+    voxelButtons->addLayout(undoRow);
 
-    auto* exportButton = new QPushButton("Export voxel edits...", _panel);
+    auto* exportButton = new QPushButton("Export voxel edits...", _voxelButtons);
     exportButton->setToolTip("Writes every live edit to <project>/everwood/export for the server import (EVERWOOD-MODE.md).");
-    outer->addWidget(exportButton);
-    auto* reseedButton = new QPushButton("Re-seed from saved ADTs", _panel);
+    voxelButtons->addWidget(exportButton);
+    auto* reseedButton = new QPushButton("Re-seed from saved ADTs", _voxelButtons);
     reseedButton->setToolTip("Replays every edit on the ADT heights as saved on disk now. Use it after saving terrain changes under voxel edits.");
-    outer->addWidget(reseedButton);
+    voxelButtons->addWidget(reseedButton);
+    outer->addWidget(_voxelButtons);
 
     _hint = new QLabel(_panel);
     _hint->setWordWrap(true);
@@ -450,6 +490,11 @@ namespace Noggit
     QObject::connect(_pushDirBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _pushAlongView = i == 1; });
     QObject::connect(_archBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _arch = float(v); });
     QObject::connect(_thicknessBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _thickness = float(v); });
+
+    QObject::connect(_flowModeBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _flowErase = i == 1; });
+    QObject::connect(_flowRadiusBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _flowRadius = float(v); });
+    QObject::connect(_flowVelocityBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _flowVelocity = float(v); });
+    QObject::connect(_flowTurbulenceBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _flowTurbulence = float(v); });
 
     QObject::connect(_paintTextureBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i)
     {
@@ -521,6 +566,7 @@ namespace Noggit
     bool const shapeMatters = bridge || pushPull || (sculpt && (_mode == SculptMode::Dig || _mode == SculptMode::Build));
     bool const softOptions = sculpt && !pushPull && !_hard;
     bool const paint = _kind == Kind::Paint;
+    bool const flow = _kind == Kind::Flow;
 
     auto show = [this](QWidget* field, bool visible)
     {
@@ -530,7 +576,8 @@ namespace Noggit
     };
     show(_modeBox, sculpt);
     show(_bridgeKindBox, bridge);
-    show(_strengthBox, !bridge && !paint);
+    show(_strengthBox, !bridge && !paint && !flow);
+    show(_radiusBox, !flow);
     show(_shapeBox, shapeMatters);
     show(_hardBox, sculpt && !pushPull);
     show(_falloffBox, softOptions);
@@ -544,6 +591,8 @@ namespace Noggit
     _confirmButton->setVisible(bridge);
     _cancelButton->setVisible(bridge);
     _paintBox->setVisible(paint);
+    _flowBox->setVisible(flow);
+    _voxelButtons->setVisible(!flow);
     _eraseBox->setEnabled(!_paintReveal);
     if (!paint)
       setHint({});
@@ -637,7 +686,11 @@ namespace Noggit
       return true;
     };
     bool const on = value == "1" || value == "on" || value == "true";
-    if (key == "tool") return pick(_kindBox, { "sculpt", "flatten", "bridge", "paint" });
+    if (key == "tool") return pick(_kindBox, { "sculpt", "flatten", "bridge", "paint", "flow" });
+    if (key == "flow_mode") return pick(_flowModeBox, { "paint", "erase" });
+    if (key == "flow_radius") { _flowRadiusBox->setValue(value.toDouble()); return true; }
+    if (key == "flow_velocity") { _flowVelocityBox->setValue(value.toDouble()); return true; }
+    if (key == "flow_turbulence") { _flowTurbulenceBox->setValue(value.toDouble()); return true; }
     if (key == "texture") return selectPaintText(value);
     if (key == "opacity") { _opacityBox->setValue(value.toDouble()); return true; }
     if (key == "paint_falloff") return pick(_paintFalloffBox, { "smooth", "linear", "flat" });
@@ -667,12 +720,17 @@ namespace Noggit
 
   void EverwoodTool::onDeselected()
   {
+    if (_flowHeld)
+      flowEnd();
+    _flowHit.reset();
     if (_strokeHeld)
       endStroke();
   }
 
   void EverwoodTool::onFocusLost()
   {
+    if (_flowHeld)
+      flowEnd();
     if (_strokeHeld)
       endStroke();
   }
@@ -683,6 +741,7 @@ namespace Noggit
     _layer->releaseGl();
     _sphere.unload();
     _box.unload();
+    _line.unload();
   }
 
   // ---------------------------------------------------------------------------------------------- aim
@@ -935,6 +994,14 @@ namespace Noggit
     if (params.displayMode != display_mode::in_3D)
       return;
 
+    if (_kind == Kind::Flow)
+    {
+      flowTick(params);
+      return;
+    }
+    if (_flowHeld)
+      flowEnd();
+
     updateAim();
 
     if (_kind == Kind::Bridge)
@@ -1114,6 +1181,12 @@ namespace Noggit
   {
     if (!params.mod_alt_down)
       return;
+    if (_kind == Kind::Flow)
+    {
+      _flowRadiusBox->setValue(std::clamp(double(_flowRadius + (params.event.angleDelta().y() > 0 ? 2.f : -2.f)),
+                                          double(FLOW_RADIUS_MIN), double(FLOW_RADIUS_MAX)));
+      return;
+    }
     float const step = params.event.angleDelta().y() > 0 ? 0.5f : -0.5f;
     _radiusBox->setValue(std::clamp(double(brushRadius() + step), 0.5, _kind == Kind::Paint ? double(PAINT3_MAX_RADIUS) : 16.0));
   }
@@ -1138,6 +1211,12 @@ namespace Noggit
       // Both other shapes are boxes in WoW axes; for the cylinder this is its bounding box.
       _box.draw(modelView, projection, glm::mat4x4(1.f), color, p - glm::vec3(radius), p + glm::vec3(radius));
     };
+
+    if (_kind == Kind::Flow)
+    {
+      renderFlow(mvp);
+      return;
+    }
 
     if (_kind == Kind::Bridge)
     {
@@ -1179,6 +1258,195 @@ namespace Noggit
           color = glm::vec4(0.5f, 0.7f, 1.f, 1.f);
       }
       drawBrush(_aim->pos, _radius, usesShape ? _shape : uint8_t(SHAPE_SPHERE), color);
+    }
+  }
+
+  // ------------------------------------------------------------------------------------------ water flow
+  // Coordinates: the contract's pos / dir are WoW world coordinates (x north, y west, z up). Noggit's internal
+  // space is (ZEROPOINT - wow.y, wow.z, ZEROPOINT - wow.x); wowToNoggit / noggitToWow (EverwoodLayer.cpp, the
+  // same axis swap the .gps coordinates use) convert points both ways. Directions are built in WoW axes from two
+  // converted sample points, so no vector conversion is needed.
+  void EverwoodTool::flowTick(TickParameters const& params)
+  {
+    ::World* world = mapView()->getWorld();
+
+    _flowHit.reset();
+    bool onWater = false;
+    if (auto const liquid = world->intersectLiquid(mapView()->intersect_ray(), -1))
+    {
+      _flowHit = *liquid;
+      onWater = true;
+    }
+    else if (!params.underMap)
+      _flowHit = mapView()->cursorPosition();
+
+    if (!params.left_mouse)
+    {
+      if (_flowHeld)
+        flowEnd();
+      return;
+    }
+    if (!_flowHit)
+      return;
+
+    glm::vec3 const wow = noggitToWow(*_flowHit);
+    std::optional<float> const waterZ = onWater ? std::optional<float>(wow.z) : std::nullopt;
+
+    if (!_flowHeld)
+    {
+      _flowHeld = true;
+      _flowTouched.clear();
+      _flowSamples = 0;
+      _flowLastWow = wow;
+      if (_flowErase)
+        flowApply(wow, glm::vec2(0.f), waterZ);
+      return;
+    }
+
+    if (_flowErase)
+    {
+      flowApply(wow, glm::vec2(0.f), waterZ);
+      _flowLastWow = wow;
+      return;
+    }
+
+    glm::vec2 const d(wow.x - _flowLastWow->x, wow.y - _flowLastWow->y);
+    float const len = glm::length(d);
+    if (len < FLOW_MIN_STEP)
+      return;
+    flowApply(wow, d / len, waterZ);
+    _flowLastWow = wow;
+  }
+
+  // One drag sample: every chunk within the brush that has water gets (Paint) one flow point or (Erase) none.
+  // Each touched chunk is registered with the current action first, so the stroke is one undo step.
+  void EverwoodTool::flowApply(glm::vec3 const& centreWow, glm::vec2 const& dirWow, std::optional<float> hitWaterZ)
+  {
+    ::World* world = mapView()->getWorld();
+    glm::vec3 const centre = wowToNoggit(centreWow);
+    float const radius = std::clamp(_flowRadius, FLOW_RADIUS_MIN, FLOW_RADIUS_MAX);
+    bool const erase = _flowErase;
+
+    // Pass 1: which chunks qualify, and the water height (the hit's, else the mean of the chunks').
+    float heightSum = 0.f;
+    int heightCount = 0;
+    world->for_all_chunks_in_range(centre, radius, [&](MapChunk* chunk)
+    {
+      ChunkWater* water = chunk->liquid_chunk();
+      if (water && water->hasData(0) && (!erase || water->flowCount()))
+      {
+        heightSum += water->getMaxHeight();
+        ++heightCount;
+      }
+      return false;
+    });
+    if (!heightCount)
+      return;
+    float const waterZ = hitWaterZ ? *hitWaterZ : heightSum / float(heightCount);
+
+    mclq_flowvs slot{};
+    slot.pos[0] = centreWow.x;
+    slot.pos[1] = centreWow.y;
+    slot.pos[2] = waterZ;
+    slot.radius = radius;
+    slot.dir[0] = dirWow.x;
+    slot.dir[1] = dirWow.y;
+    slot.dir[2] = 0.f;
+    slot.velocity = std::clamp(_flowVelocity, 0.f, 8.f);
+    slot.amplitude = std::clamp(_flowTurbulence, 0.f, 1.f);
+    slot.frequency = 0.f;
+
+    NOGGIT_ACTION_MGR->beginAction(mapView(), ActionFlags::eCHUNKS_WATER, ActionModalityControllers::eLMB);
+
+    // Pass 2: edit; a changed chunk marks its tile so it saves.
+    world->for_all_chunks_in_range(centre, radius, [&](MapChunk* chunk)
+    {
+      ChunkWater* water = chunk->liquid_chunk();
+      if (!water || !water->hasData(0) || (erase && !water->flowCount()))
+        return false;
+      NOGGIT_CUR_ACTION->registerChunkLiquidChange(chunk);
+      if (erase)
+        water->clearFlow();
+      else
+        water->setFlow(slot);
+      water->tagUpdate();
+      _flowTouched.insert(water);
+      return true;
+    });
+    ++_flowSamples;
+  }
+
+  void EverwoodTool::flowEnd()
+  {
+    if (_flowTouched.empty())
+      Log << "[everwood-flow] stroke changed nothing (no water under the brush)" << std::endl;
+    else if (_flowErase)
+      Log << "[everwood-flow] erased " << _flowTouched.size() << " chunks (" << _flowSamples << " samples, radius "
+          << _flowRadius << " yd)" << std::endl;
+    else
+      Log << "[everwood-flow] painted " << _flowTouched.size() << " chunks (" << _flowSamples << " samples, radius "
+          << _flowRadius << " yd, velocity " << _flowVelocity << " yd/s, turbulence " << _flowTurbulence << ")" << std::endl;
+    _flowHeld = false;
+    _flowLastWow.reset();
+    _flowTouched.clear();
+    _flowSamples = 0;
+  }
+
+  void EverwoodTool::renderFlow(glm::mat4x4 const& mvp)
+  {
+    // An arrow per flow point: shaft + two head strokes, at water height, in WoW axes then converted.
+    std::vector<glm::vec3> seg;
+    auto arrow = [&](mclq_flowvs const& f)
+    {
+      glm::vec2 const d(f.dir[0], f.dir[1]);
+      float const dl = glm::length(d);
+      if (dl < 1e-4f)
+        return;
+      glm::vec2 const u = d / dl;
+      glm::vec2 const n(-u.y, u.x);
+      float const length = 4.f + f.velocity * 2.f;
+      float const lift = 0.2f;
+      glm::vec2 const tail(f.pos[0], f.pos[1]);
+      glm::vec2 const tip = tail + u * length;
+      glm::vec2 const left = tip - u * 1.2f + n * 0.6f;
+      glm::vec2 const right = tip - u * 1.2f - n * 0.6f;
+      auto point = [&](glm::vec2 const& p) { return wowToNoggit({ p.x, p.y, f.pos[2] + lift }); };
+      seg.push_back(point(tail)); seg.push_back(point(tip));
+      seg.push_back(point(tip));  seg.push_back(point(left));
+      seg.push_back(point(tip));  seg.push_back(point(right));
+    };
+
+    for (MapTile* tile : mapView()->getWorld()->mapIndex.loaded_tiles())
+    {
+      if (!tile || !tile->finishedLoading())
+        continue;
+      for (int z = 0; z < 16; ++z)
+        for (int x = 0; x < 16; ++x)
+        {
+          ChunkWater* water = tile->Water.getChunk(x, z);
+          if (!water)
+            continue;
+          for (std::uint32_t i = 0; i < water->flowCount() && i < 2; ++i)
+            arrow(water->flowSlot(int(i)));
+        }
+    }
+    glm::vec4 const arrowColor(0.45f, 0.8f, 1.f, 1.f);
+    _line.drawSegments(mvp, seg, arrowColor);
+
+    if (_flowHit)
+    {
+      std::vector<glm::vec3> ring;
+      int const steps = 48;
+      float const r = std::clamp(_flowRadius, FLOW_RADIUS_MIN, FLOW_RADIUS_MAX);
+      glm::vec4 const color = _flowErase ? glm::vec4(1.f, 0.5f, 0.4f, 1.f) : glm::vec4(0.3f, 1.f, 0.9f, 1.f);
+      for (int i = 0; i < steps; ++i)
+      {
+        float const a0 = 6.2831853f * float(i) / float(steps);
+        float const a1 = 6.2831853f * float(i + 1) / float(steps);
+        ring.push_back(*_flowHit + glm::vec3(std::cos(a0) * r, 0.2f, std::sin(a0) * r));
+        ring.push_back(*_flowHit + glm::vec3(std::cos(a1) * r, 0.2f, std::sin(a1) * r));
+      }
+      _line.drawSegments(mvp, ring, color);
     }
   }
 }

@@ -2,7 +2,8 @@
 //
 // The "Everwood" tool panel: sculpt (dig / build / smooth, push / pull), flatten, bridge / tunnel on the
 // voxel layer, and (CONTRACT v3.10) "Paint (caves)", the 3D voxel paint (journal mode 7) of dug and built faces;
-// the same brushes as the game's EME map editor (crates/eme/src/tools). Only created when
+// the same brushes as the game's EME map editor (crates/eme/src/tools), and "Water flow" (EVERWOOD-WATER-FLOW.md:
+// drag across water to author its current in the MCLQ flow slots of the ADT). Only created when
 // the project has EverwoodMode. See EVERWOOD-MODE.md.
 #pragma once
 
@@ -16,8 +17,10 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <unordered_set>
 #include <vector>
 
+class ChunkWater;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -77,7 +80,7 @@ namespace Noggit
   class EverwoodTool final : public Tool
   {
   public:
-    enum class Kind { Sculpt = 0, Flatten = 1, Bridge = 2, Paint = 3 };
+    enum class Kind { Sculpt = 0, Flatten = 1, Bridge = 2, Paint = 3, Flow = 4 };
     enum class SculptMode { Dig = 0, Build = 1, Smooth = 2, Push = 3, Pull = 4 };
 
     explicit EverwoodTool(MapView* mapView);
@@ -135,6 +138,12 @@ namespace Noggit
     bool selectPaintText(QString const& text);
     void setHint(QString const& text);
 
+    // Water flow (EVERWOOD-WATER-FLOW.md).
+    void flowTick(TickParameters const& params);
+    void flowEnd();
+    void flowApply(glm::vec3 const& centreWow, glm::vec2 const& dirWow, std::optional<float> hitWaterZ);
+    void renderFlow(glm::mat4x4 const& mvp);
+
     void beginStroke(Everwood::AimHit const& hit);
     void endStroke();
     void commit(std::vector<Edit> const& edits);
@@ -184,6 +193,16 @@ namespace Noggit
     bool _paintErase = false;
     bool _paintReveal = false;
     bool _actionOpen = false;
+    // Water flow
+    float _flowRadius = 16.f;
+    float _flowVelocity = 1.5f;
+    float _flowTurbulence = 0.5f;
+    bool _flowErase = false;
+    bool _flowHeld = false;
+    std::optional<glm::vec3> _flowLastWow;        // previous drag sample (WoW axes)
+    std::optional<glm::vec3> _flowHit;            // cursor on water / terrain (Noggit axes)
+    std::unordered_set<ChunkWater*> _flowTouched; // chunks changed by the current stroke
+    size_t _flowSamples = 0;
 
     // The stroke.
     EverwoodStrokeBuilder _builder;
@@ -228,8 +247,15 @@ namespace Noggit
     QComboBox* _paintFalloffBox = nullptr;
     QCheckBox* _eraseBox = nullptr;
     QCheckBox* _revealBox = nullptr;
+    QWidget* _flowBox = nullptr;
+    QWidget* _voxelButtons = nullptr;    // Undo / Redo stroke, Export, Re-seed (hidden for Water flow)
+    QDoubleSpinBox* _flowRadiusBox = nullptr;
+    QDoubleSpinBox* _flowVelocityBox = nullptr;
+    QDoubleSpinBox* _flowTurbulenceBox = nullptr;
+    QComboBox* _flowModeBox = nullptr;
     bool _updating = false;
 
+    Noggit::Rendering::Primitives::Line _line;
     Noggit::Rendering::Primitives::Sphere _sphere;
     Noggit::Rendering::Primitives::WireBox _box;
   };

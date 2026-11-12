@@ -147,6 +147,8 @@ namespace Noggit::Rendering::Primitives
   public:
       void initSpline();
       void draw(glm::mat4x4 const& mvp, std::vector<glm::vec3> const& points, glm::vec4 const& color, bool spline);
+      // Independent segments (points 0-1, 2-3, ...) in one draw call; at most 65534 points.
+      void drawSegments(glm::mat4x4 const& mvp, std::vector<glm::vec3> const& points, glm::vec4 const& color);
       void unload();
 
   private:
