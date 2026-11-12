@@ -717,8 +717,32 @@ namespace Noggit::Everwood
 
   void EverwoodLayer::flushColumns()
   {
+    // A mesh draws only the triangles near changed lattice columns, and the mask hides a cell at every height.
+    // So when a column's changed cells move, every active chunk of it and of its neighbour columns (the mesh
+    // filter reaches 2 lattice cells) needs a new mesh, at ALL heights - not only the chunks the edit touched.
+    // Else ground meshed before a ledge was built 2+ chunks above it stays empty under the ledge: a hole.
+    std::vector<ColKey> moved;
     for (ColKey const& col : _dirtyColumns)
+    {
+      auto const before = _columns.find(col);
+      std::vector<uint8_t> const old = before == _columns.end() ? std::vector<uint8_t>{} : before->second.changed;
+      bool const oldAny = before != _columns.end() && before->second.any;
       recomputeColumn(col);
+      ColumnState const& now = _columns[col];
+      if (now.any != oldAny || (now.any && now.changed != old))
+        moved.push_back(col);
+    }
+    if (!moved.empty())
+    {
+      std::set<ColKey> around;
+      for (ColKey const& col : moved)
+        for (int dy = -1; dy <= 1; ++dy)
+          for (int dx = -1; dx <= 1; ++dx)
+            around.insert(ColKey{ col[0] + dx, col[1] + dy });
+      for (auto const& kv : _field.ChunksRef())
+        if (around.count(ColKey{ kv.first[0], kv.first[1] }))
+          _dirtyMeshes.insert(kv.first);
+    }
     for (ColKey const& col : _dirtyColumns)
       writeMaskAround(col);
     _dirtyColumns.clear();
