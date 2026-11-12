@@ -189,19 +189,155 @@ namespace Noggit::Everwood
     if (it != _tiles.end())
       return it->second.get();
 
-    std::shared_ptr<Adt::Tile> tile;
-    std::vector<char> bytes;
-    readAdt(tileX, tileY, bytes);
-    if (!bytes.empty())
+    // Heights edited in this session (Noggit's terrain tools) seed from memory, exactly as the tile will be saved:
+    // otherwise the raised or lowered ADT stays hidden under the edit while the voxel surface keeps the old ground,
+    // and the seam between them opens into a hole. Untouched tiles keep reading the bytes the game reads.
+    uint64_t stamp = 0;
+    std::shared_ptr<Adt::Tile> tile = liveTile(tileX, tileY, &stamp);
+    if (tile && stamp != 0)
     {
-      auto parsed = std::make_shared<Adt::Tile>();
-      if (Adt::ParseTile(bytes.data(), bytes.size(), *parsed))
-        tile = std::move(parsed);
-      else
-        LogError << "Everwood: no terrain chunks in tile " << tileX << "_" << tileY << std::endl;
+      ++_liveTiles;
     }
+    else
+    {
+      tile.reset();
+      std::vector<char> bytes;
+      readAdt(tileX, tileY, bytes);
+      if (!bytes.empty())
+      {
+        auto parsed = std::make_shared<Adt::Tile>();
+        if (Adt::ParseTile(bytes.data(), bytes.size(), *parsed))
+          tile = std::move(parsed);
+        else
+          LogError << "Everwood: no terrain chunks in tile " << tileX << "_" << tileY << std::endl;
+      }
+    }
+    _tileStamps[key] = stamp;
     _tiles.emplace(key, tile);
     return tile.get();
+  }
+
+  std::shared_ptr<Adt::Tile> EverwoodLayer::liveTile(int tileX, int tileY, uint64_t* heightStamp)
+  {
+    if (heightStamp)
+      *heightStamp = 0;
+    if (tileX < 0 || tileY < 0 || tileX >= 64 || tileY >= 64)
+      return nullptr;
+    TileIndex const index(static_cast<std::size_t>(tileX), static_cast<std::size_t>(tileY));
+    if (!_world->mapIndex.hasTile(index) || !_world->mapIndex.tileLoaded(index))
+      return nullptr;
+    MapTile* mt = _world->mapIndex.getTile(index);
+    if (!mt || !mt->finishedLoading())
+      return nullptr;
+
+    auto tile = std::make_shared<Adt::Tile>();
+    tile->chunks.reserve(256);
+    uint64_t stamp = 0;
+    // File order: MCNK index = iy * 16 + ix, and MapTile::getChunk(ix, iy) (Tile::HeightAt indexes by it).
+    for (unsigned iy = 0; iy < 16; ++iy)
+    {
+      for (unsigned ix = 0; ix < 16; ++ix)
+      {
+        MapChunk* chunk = mt->getChunk(ix, iy);
+        if (!chunk)
+          continue;
+        stamp += chunk->heightStamp();
+        // What MapChunk::save writes: position 0x68 = -zbase + ZEROPOINT, 0x6C = -xbase + ZEROPOINT,
+        // 0x70 = the first vertex's height, MCVT = each height minus the first one, holes as stored.
+        float const base[3] = { chunk->zbase * -1.0f + ZEROPOINT, chunk->xbase * -1.0f + ZEROPOINT
+                              , chunk->mVertices[0].y };
+        float heights[145];
+        for (int i = 0; i < 145; ++i)
+          heights[i] = chunk->mVertices[i].y - chunk->mVertices[0].y;
+        Adt::Chunk c;
+        Adt::BuildChunk(base, heights, static_cast<uint16_t>(chunk->holes & 0xFFFF), c);
+        tile->chunks.push_back(c);
+      }
+    }
+    if (heightStamp)
+      *heightStamp = stamp;
+    return tile->chunks.empty() ? nullptr : tile;
+  }
+
+  uint64_t EverwoodLayer::tileHeightStamp(int tileX, int tileY) const
+  {
+    if (tileX < 0 || tileY < 0 || tileX >= 64 || tileY >= 64)
+      return 0;
+    TileIndex const index(static_cast<std::size_t>(tileX), static_cast<std::size_t>(tileY));
+    if (!_world->mapIndex.hasTile(index) || !_world->mapIndex.tileLoaded(index))
+      return 0;
+    MapTile* mt = _world->mapIndex.getTile(index);
+    if (!mt || !mt->finishedLoading())
+      return 0;
+    uint64_t stamp = 0;
+    for (unsigned iy = 0; iy < 16; ++iy)
+      for (unsigned ix = 0; ix < 16; ++ix)
+        if (MapChunk* chunk = mt->getChunk(ix, iy))
+          stamp += chunk->heightStamp();
+    return stamp;
+  }
+
+  bool EverwoodLayer::followTerrainEdits()
+  {
+    constexpr int HEIGHT_SETTLE_MS = 300;
+    bool differs = false;
+    uint64_t sig = 0;
+    for (auto const& kv : _tiles)
+    {
+      uint64_t const now = tileHeightStamp(kv.first / 64, kv.first % 64);
+      sig = sig * 1099511628211ull + now + uint64_t(kv.first);
+      auto st = _tileStamps.find(kv.first);
+      if (st == _tileStamps.end() || st->second != now)
+        differs = true;
+    }
+    if (!differs)
+    {
+      _heightsPending = false;
+      return false;
+    }
+    auto const now = std::chrono::steady_clock::now();
+    if (!_heightsPending || sig != _heightsPendingSig)
+    {
+      // still sculpting: wait until the heights stay put
+      _heightsPending = true;
+      _heightsPendingSig = sig;
+      _heightsPendingSince = now;
+      return false;
+    }
+    if (now - _heightsPendingSince < std::chrono::milliseconds(HEIGHT_SETTLE_MS))
+      return false;
+    _heightsPending = false;
+    Log << "Everwood: terrain heights under the voxel edits changed, reseeding from the live heights" << std::endl;
+    reseed();
+    return true;
+  }
+
+  float EverwoodLayer::liveSeedDifference(int tileX, int tileY, size_t& samples)
+  {
+    samples = 0;
+    std::shared_ptr<Adt::Tile> live = liveTile(tileX, tileY, nullptr);
+    std::vector<char> bytes;
+    readAdt(tileX, tileY, bytes);
+    Adt::Tile file;
+    if (!live || bytes.empty() || !Adt::ParseTile(bytes.data(), bytes.size(), file))
+      return 0.0f;
+    // Tile (tileX, tileY) covers WoW y from ZEROPOINT - (tileX + 1) * TILESIZE, WoW x likewise from tileY.
+    float const x0 = ZEROPOINT - float(tileY + 1) * Adt::TILE_SIZE, y0 = ZEROPOINT - float(tileX + 1) * Adt::TILE_SIZE;
+    float worst = 0.0f;
+    for (int i = 1; i < 1066; ++i)
+    {
+      for (int j = 1; j < 1066; ++j)
+      {
+        float const x = x0 + float(i) * 0.5f, y = y0 + float(j) * 0.5f;
+        float a = 0.0f, b = 0.0f;
+        if (live->HeightAt(x, y, a) && file.HeightAt(x, y, b))
+        {
+          worst = std::max(worst, std::fabs(a - b));
+          ++samples;
+        }
+      }
+    }
+    return worst;
   }
 
   bool EverwoodLayer::seedHeight(float x, float y, float& h)
@@ -862,6 +998,9 @@ namespace Noggit::Everwood
   void EverwoodLayer::reseed()
   {
     _tiles.clear();
+    _tileStamps.clear();
+    _liveTiles = 0;
+    _heightsPending = false;
     _field.Clear();
     _columns.clear();
     _dirtyColumns.clear();
@@ -990,6 +1129,8 @@ namespace Noggit::Everwood
       forgetGl();
       _glContext = QOpenGLContext::currentContext();
     }
+
+    followTerrainEdits();
 
     for (auto& kv : _masks)
     {

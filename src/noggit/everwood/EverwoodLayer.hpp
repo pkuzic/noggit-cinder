@@ -13,6 +13,7 @@
 
 #include <glm/glm.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -113,6 +114,14 @@ namespace Noggit::Everwood
     std::string exportEdits(std::string const& projectName);
     // Forget the cached ADT heights and replay everything (the project's ADTs changed).
     void reseed();
+    // Called every frame: once the heights of a tile the seed read have changed in this session (Noggit's terrain
+    // tools, their undo, holes) and then stayed put for HEIGHT_SETTLE_MS, reseed from the live heights. Returns
+    // true when it reseeded.
+    bool followTerrainEdits();
+    // Test hook: the largest |height| difference between the live seed of a loaded tile and the seed read from its
+    // ADT bytes on disk, over a 0.5-yd grid. samples = points both answered (0 = not loaded or no file).
+    float liveSeedDifference(int tileX, int tileY, size_t& samples);
+    size_t liveSeedTileCount() const { return _liveTiles; }
 
     // ---- rendering, called by WorldRender with a current context
     void prepareFrame();
@@ -165,6 +174,10 @@ namespace Noggit::Everwood
     bool seedHeight(float x, float y, float& h);
     Adt::Tile const* tileAt(int tileX, int tileY);
     void readAdt(int tileX, int tileY, std::vector<char>& out);
+    // The tile's terrain as MapChunk::save would write it (same floats the game reads after a save); null when the
+    // tile is not loaded. heightStamp = sum of its chunks' MapChunk::heightStamp() (0 = untouched this session).
+    std::shared_ptr<Adt::Tile> liveTile(int tileX, int tileY, uint64_t* heightStamp);
+    uint64_t tileHeightStamp(int tileX, int tileY) const;
 
     void rebuildJournal();
     void noteChanged(std::vector<Voxel::Key> const& keys, std::vector<Voxel::Key> const* added);
@@ -200,6 +213,11 @@ namespace Noggit::Everwood
     uint16_t _nextStroke = 1;
 
     std::unordered_map<int, std::shared_ptr<Adt::Tile>> _tiles;   // tileX * 64 + tileY, null = no file
+    std::unordered_map<int, uint64_t> _tileStamps;                 // the height stamp each cached tile was built at
+    size_t _liveTiles = 0;                                         // cached tiles built from live heights
+    bool _heightsPending = false;
+    uint64_t _heightsPendingSig = 0;
+    std::chrono::steady_clock::time_point _heightsPendingSince;
     std::unordered_map<Voxel::ColKey, ColumnState, Voxel::ColHash> _columns;
     std::unordered_set<Voxel::ColKey, Voxel::ColHash> _dirtyColumns;
     std::unordered_set<Voxel::Key, Voxel::KeyHash> _dirtyMeshes;

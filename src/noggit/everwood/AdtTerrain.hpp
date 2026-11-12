@@ -36,6 +36,11 @@ namespace Noggit::Everwood::Adt
     bool HeightAt(float x, float y, float& h) const;
   };
 
+  // The chunk mesh from an MCNK's position (file offsets 0x68, 0x6C, 0x70), its 145 MCVT heights and its holes,
+  // exactly as read_mcnk + adt_to_tile_mesh build it. Also builds the live seed of a tile whose heights were edited
+  // in this session (EverwoodLayer::tileAt), from the values MapChunk::save would write.
+  void BuildChunk(float const (&base)[3], float const (&heights)[145], uint16_t holes, Chunk& out);
+
   // parse_adt + read_mcnk + adt_to_tile_mesh, heights only. false = no terrain chunks in the file.
   bool ParseTile(void const* data, size_t size, Tile& out);
 

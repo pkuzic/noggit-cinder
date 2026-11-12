@@ -643,6 +643,39 @@ namespace Noggit::Everwood
       {
         requireTool()->layer()->reseed();
       }
+      else if (cmd == "terrain")
+      {
+        // terrain <wow x> <wow y> <radius> <change>: one dab of Noggit's own terrain tool (raise > 0, lower < 0,
+        // smooth brush), as one undoable action, at the ground height under (x, y)
+        auto* layer = requireTool()->layer();
+        World* world = _view->getWorld();
+        _view->makeCurrent();
+        OpenGL::context::scoped_setter const _(::gl, _view->context());
+        glm::vec3 pos(ZEROPOINT - f(2), 0.0f, ZEROPOINT - f(1));
+        float h = 0.0f;
+        if (layer->rawGround(f(1), f(2), h))
+          pos.y = h;
+        NOGGIT_ACTION_MGR->beginAction(_view, Noggit::ActionFlags::eCHUNKS_TERRAIN);
+        world->changeTerrain(pos, f(4), f(3), int(eTerrainType_Smooth), 0.0f);
+        NOGGIT_ACTION_MGR->endAction();
+        report("terrain dab");
+      }
+      else if (cmd == "live_seed")
+      {
+        // live_seed <tileX> <tileY> [max]: the live seed of a loaded tile against its ADT bytes on disk
+        size_t samples = 0;
+        auto* layer = requireTool()->layer();
+        float const diff = layer->liveSeedDifference(a.value(1).toInt(), a.value(2).toInt(), samples);
+        report("live seed vs file: max diff " + std::to_string(diff) + " over " + std::to_string(samples)
+               + " points, live tiles " + std::to_string(layer->liveSeedTileCount()));
+        if (a.size() > 3)
+          expect(samples > 0 && diff <= f(3), "live seed within " + a.value(3).toStdString() + " of the file");
+      }
+      else if (cmd == "expect_live_tiles")
+      {
+        size_t const n = requireTool()->layer()->liveSeedTileCount();
+        expect(n == size_t(a.value(1).toInt()), "live seed tiles " + std::to_string(n) + " vs " + a.value(1).toStdString());
+      }
       else if (cmd == "camera_last")
       {
         // camera_last <distance> <height over the ground> [side]: look at the last edit

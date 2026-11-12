@@ -67,30 +67,35 @@ namespace Noggit::Everwood::Adt
       float heights[145];
       std::memcpy(heights, mcnk + start, sizeof(heights));
 
-      out.holes = holes;
-      float const wx = base[0], wy = base[1], wz = base[2];
-      size_t n = 0;
-      for (uint32_t row = 0; row < 9; ++row)
+      BuildChunk(base, heights, holes, out);
+      return true;
+    }
+  }
+
+  void BuildChunk(float const (&base)[3], float const (&heights)[145], uint16_t holes, Chunk& out)
+  {
+    out.holes = holes;
+    float const wx = base[0], wy = base[1], wz = base[2];
+    size_t n = 0;
+    for (uint32_t row = 0; row < 9; ++row)
+    {
+      for (uint32_t col = 0; col < 9; ++col)
       {
-        for (uint32_t col = 0; col < 9; ++col)
+        float const h = heights[row * 17 + col];
+        out.positions[n++] = { snapToLattice(wx - float(row) * UNIT_SIZE)
+                             , snapToLattice(wy - float(col) * UNIT_SIZE)
+                             , wz + h };
+      }
+      if (row < 8)
+      {
+        for (uint32_t col = 0; col < 8; ++col)
         {
-          float const h = heights[row * 17 + col];
-          out.positions[n++] = { snapToLattice(wx - float(row) * UNIT_SIZE)
-                               , snapToLattice(wy - float(col) * UNIT_SIZE)
+          float const h = heights[row * 17 + 9 + col];
+          out.positions[n++] = { wx - (float(row) * UNIT_SIZE + UNIT_SIZE / 2.0f)
+                               , wy - (float(col) * UNIT_SIZE + UNIT_SIZE / 2.0f)
                                , wz + h };
         }
-        if (row < 8)
-        {
-          for (uint32_t col = 0; col < 8; ++col)
-          {
-            float const h = heights[row * 17 + 9 + col];
-            out.positions[n++] = { wx - (float(row) * UNIT_SIZE + UNIT_SIZE / 2.0f)
-                                 , wy - (float(col) * UNIT_SIZE + UNIT_SIZE / 2.0f)
-                                 , wz + h };
-          }
-        }
       }
-      return true;
     }
   }
 

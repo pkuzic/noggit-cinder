@@ -33,10 +33,14 @@ Hold the left mouse button to paint a stroke. Alt + wheel changes the radius. On
 Noggit's action history and the panel's buttons all work on it. Undoing rebuilds the affected chunks from the
 remaining edits, the same canonical rebuild as the game.
 
-**Re-seed from saved ADTs** replays every edit on the heights as saved on disk now. The seed reads the raw ADT
-through Noggit's project-then-client file lookup, so unsaved terrain edits do not move the voxel surface until
-they are saved and re-seeded. Terrain sculpted under an edited area with Noggit's other tools still edits the ADT
-as usual, but that part of the ADT stays hidden while the voxel edit is there.
+The seed reads the raw ADT through Noggit's project-then-client file lookup, the same bytes the game reads. A tile
+whose heights or holes were changed in this session with Noggit's other tools (raise, lower, smooth, holes, their
+undo) seeds from memory instead, built with exactly the floats `MapChunk::save` writes, so the voxel surface follows
+the terrain at once: about 0.3 s after the terrain stops changing, the layer replays every edit on the new heights
+(the log says "reseeding from the live heights"). After a save the file gives the same seed bit for bit. Before
+this, a raised ground stayed hidden under the edit while the voxel surface kept the old ground, and the seam opened
+into a hole. **Re-seed from saved ADTs** replays every edit on the heights as saved on disk now (use it after
+replacing ADT files outside Noggit).
 
 ## Painting voxel ground
 
@@ -220,6 +224,11 @@ Fairbanks (Apache-2.0 / MIT).
 Включается галочкой **Everwood Mode** при создании проекта или в **Noggit > Project Settings...**; вступает в силу при
 следующем открытии карты. Инструменты: лепка (копать, насыпать, сглаживать, вдавить, выдавить), выравнивание, мост и
 тоннель. Кнопка **Export voxel edits** пишет файл для будущего импорта на сервер; форматы описаны выше.
+
+Воксельный слой следует за ландшафтом: если поднять, опустить или сгладить землю обычными инструментами Noggit
+под воксельной правкой или рядом с ней, примерно через 0,3 с после последнего мазка все правки пересчитываются
+на новых высотах, и шов между землёй и вокселями не раскрывается в дыру. После сохранения тайла высоты из файла
+совпадают с этими до бита. **Re-seed from saved ADTs** нужен только после замены ADT-файлов вне Noggit.
 
 ## Масштаб WMO
 

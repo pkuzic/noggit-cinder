@@ -2202,6 +2202,10 @@ void MapChunk::registerChunkUpdate(unsigned flags)
   {
     _appearance_stamp++;
   }
+  if (flags & (ChunkUpdateFlags::VERTEX | ChunkUpdateFlags::HOLES))
+  {
+    _height_stamp++;
+  }
 
   // any edit that changes terrain/texture/holes invalidates the cached detail-doodad layout
   if (flags & (ChunkUpdateFlags::VERTEX | ChunkUpdateFlags::ALPHAMAP | ChunkUpdateFlags::FLAGS
