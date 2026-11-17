@@ -5,9 +5,11 @@
 // the terrain, ADT terrain hidden where the field was edited). Exists only in a project with EverwoodMode.
 // See EVERWOOD-MODE.md.
 #pragma once
+#include <cstring>
 
 #include <noggit/everwood/AdtTerrain.hpp>
 #include <noggit/everwood/VoxelField.hpp>
+#include <noggit/everwood/VoxelFloaters.hpp>
 #include <noggit/TextureManager.h>
 #include <opengl/types.hpp>
 
@@ -97,6 +99,18 @@ namespace Noggit::Everwood
     size_t paintedChunkCount() const;
     uint64_t paintHash() const;
 
+    // Remove floaters (VoxelFloaters.hpp): the plan only reads the field; its digs are ordinary edits the caller
+    // sends through addEdit (one stroke = one undo step).
+    Voxel::FloaterPlan planFloaters(uint32_t maxSize, Voxel::FloaterRegion const& region)
+    {
+      return Voxel::PlanFloaterRemoval(_field, maxSize, region);
+    }
+    std::vector<Voxel::Floater> findFloaters(uint32_t maxSize, Voxel::FloaterRegion const& region)
+    {
+      return Voxel::FindFloaters(_field, maxSize, region);
+    }
+    Voxel::World& field() { return _field; }          // test hook: density samples
+
     size_t liveEditCount() const { return _journal.Edits().size(); }
     Voxel::Edit const* lastEdit() const { return _journal.Edits().empty() ? nullptr : &_journal.Edits().back(); }
     size_t strokeCount() const;
@@ -150,8 +164,70 @@ namespace Noggit::Everwood
       std::uint32_t stamp;
     };
 
+    // Everything a mesh is computed from besides the ADT textures (those are tracked by the chunk stamps): the
+    // mesh window, the seed heights under it, the lattice cells near an edited column and the paint samples
+    // of the 27 chunks the window reads. A soft rebuild whose inputs equal the last build's gives the same mesh,
+    // so it is skipped.
+    struct MeshInputs
+    {
+      bool valid = false;
+      std::vector<int8_t> window;
+      std::vector<float> seed;
+      std::vector<uint8_t> nearChanged;
+      std::vector<uint16_t> paintMats;   // the 27 chunks' palettes, 0xFFFF between
+      std::vector<uint32_t> paintRgba;   // the window's paint samples; empty when none of the 27 is painted
+    };
+
+    // What a mesh keeps of its inputs: two independent 64-bit digests (FNV-1a and a multiply-xorshift mix over
+    // every input byte, lengths included) instead of the ~45-200 KB of inputs themselves.
+    struct MeshDigest
+    {
+      bool valid = false;
+      std::uint64_t a = 0, b = 0;
+      bool operator==(MeshDigest const& o) const { return valid && o.valid && a == o.a && b == o.b; }
+      static MeshDigest Of(MeshInputs const& in)
+      {
+        std::uint64_t fnv = 0xcbf29ce484222325ull, mix = 0x9e3779b97f4a7c15ull;
+        // 8 bytes per step (the per-byte loop cost ~1.7 ms per skipped mesh check on painted chunks).
+        auto word = [&](std::uint64_t w)
+        {
+          fnv = (fnv ^ w) * 0x100000001b3ull;
+          fnv ^= fnv >> 32;
+          mix = (mix ^ w) * 0xff51afd7ed558ccdull;
+          mix ^= mix >> 29;
+        };
+        auto feed = [&](void const* p, size_t n)
+        {
+          unsigned char const* c = static_cast<unsigned char const*>(p);
+          size_t i = 0;
+          for (; i + 8 <= n; i += 8)
+          {
+            std::uint64_t w;
+            std::memcpy(&w, c + i, 8);
+            word(w);
+          }
+          std::uint64_t tail = 0;
+          if (i < n)
+            std::memcpy(&tail, c + i, n - i);
+          word(tail);
+          word(std::uint64_t(n));
+        };
+        feed(in.window.data(), in.window.size());
+        feed(in.seed.data(), in.seed.size() * sizeof(float));
+        feed(in.nearChanged.data(), in.nearChanged.size());
+        feed(in.paintMats.data(), in.paintMats.size() * sizeof(std::uint16_t));
+        feed(in.paintRgba.data(), in.paintRgba.size() * sizeof(std::uint32_t));
+        MeshDigest d;
+        d.valid = in.valid;
+        d.a = fnv;
+        d.b = mix;
+        return d;
+      }
+    };
+
     struct ChunkGl
     {
+      MeshDigest inputs;
       unsigned vao = 0;
       unsigned vbo = 0;
       int indexCount = 0;                // vertices of the triangle list
@@ -191,7 +267,7 @@ namespace Noggit::Everwood
     TileMask& maskFor(int tileX, int tileY);
     void setMaskCell(int32_t i, int32_t j, bool hidden);
 
-    bool buildMesh(Voxel::Key const& key, ChunkGl& gl);
+    bool buildMesh(Voxel::Key const& key, ChunkGl& gl, bool soft = false);
     void forgetGl();
     void freeChunkGl(ChunkGl& gl);
 
@@ -220,7 +296,8 @@ namespace Noggit::Everwood
     std::chrono::steady_clock::time_point _heightsPendingSince;
     std::unordered_map<Voxel::ColKey, ColumnState, Voxel::ColHash> _columns;
     std::unordered_set<Voxel::ColKey, Voxel::ColHash> _dirtyColumns;
-    std::unordered_set<Voxel::Key, Voxel::KeyHash> _dirtyMeshes;
+    std::unordered_set<Voxel::Key, Voxel::KeyHash> _dirtyMeshes;   // rebuilt unconditionally (textures, new GL context)
+    std::unordered_set<Voxel::Key, Voxel::KeyHash> _softMeshes;    // edit-driven: rebuilt only when their inputs changed
     std::unordered_map<Voxel::Key, ChunkGl, Voxel::KeyHash> _meshes;
     std::unordered_map<int, TileMask> _masks;
     glm::vec3 _editedMin{ 1.f }, _editedMax{ 0.f };   // WoW axes; empty when max < min

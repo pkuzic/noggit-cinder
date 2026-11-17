@@ -23,10 +23,12 @@ The **Everwood** entry at the end of the left toolbar (the terrain icon, tooltip
 | Tool | What it does |
 |---|---|
 | Sculpt: Lower / Dig, Raise / Build | Soft by default: moves the ground vertically with a falloff (smooth, linear, flat) and a hardness. **Hard brush** switches to the CSG dig and build. Sphere, cube, upright cylinder. |
-| Sculpt: Smooth | Soft (falloff) or hard (uniform, at most half strength). Always a sphere. |
+| Sculpt: Smooth | Soft (falloff) or hard (uniform, at most half strength). Always a sphere. **Also remove floaters under the brush** (default on): when the stroke ends, the floaters under it are removed in the same undo step (see Remove floaters). |
 | Sculpt: Push out, Pull in | Grows sideways out of a surface or carves into it, along the surface normal or the view direction. Optional softened edge. |
 | Flatten | Levels toward the height clicked at the start of the stroke, plus an offset. |
 | Bridge / Tunnel | Click point A, point B, then click again or press **Build**. One stroke of hard edits along the path, with an arch and a deck thickness; up to 160 yd and 400 edits, as in the game. |
+| Ramp / Path | Click the ground to lay out a path (two or more points); click the last point again or press **Build ramp** (Cancel clears it). Options: Width (flat width, yd), Slope (**Follow the clicked heights**: straight between the points' heights; **Fixed angle**: leaves the first point at the given angle, + rises / - falls), Edge softness (Sharp 60 deg / Normal 45 deg / Soft 30 deg bank), Strength, **Smooth edges**. One stroke = one undo step. See Ramp / Path below. |
+| Remove floaters (button, every tool but Water flow) | Digs away tiny islands of ground that hang in the air, anywhere in the edited area; **Max floater size (voxels)** (default 64, 0.5 yd voxels). See Remove floaters below. |
 | Paint (caves) | CONTRACT v3.10 3D voxel paint (journal mode 7): paints dug or built faces (cave floors, walls, ceilings) with a texture of the shared palette, through the air the brush reaches. See below. |
 
 Hold the left mouse button to paint a stroke. Alt + wheel changes the radius. One stroke is one undo: Ctrl+Z,
@@ -41,6 +43,49 @@ the terrain at once: about 0.3 s after the terrain stops changing, the layer rep
 this, a raised ground stayed hidden under the edit while the voxel surface kept the old ground, and the seam opened
 into a hole. **Re-seed from saved ADTs** replays every edit on the heights as saved on disk now (use it after
 replacing ADT files outside Noggit).
+
+## Remove floaters
+Tiny pieces of ground can end up floating (a thin ledge dug away from below, a build blob in the air); no brush
+stroke removes them without biting the ground next to them. **Remove floaters** (panel button, whole edited
+area = every active 16 yd block, one undo step) and the Smooth checkbox find them and dig them away with ORDINARY
+hard dig edits (mode 0, sphere, strength 255) that the game replays like any other; no replay maths and no wire
+format changed. The status line says `Removed 7 floaters (31 edits)`, and `, left N` for floaters it found no safe dig for.
+- A **floater** is a 6-connected set of solid samples (density < 0) of at most *Max floater size* samples that is not
+  grounded. Grounded = some sample has a solid 6-neighbour outside the active blocks (the seeded ground continues
+  there: below the active column and beside the edited area), or the component grows past the size limit. So
+  terrain, overhangs, arches and bridges, which all reach the seeded ground or a larger body through solid samples,
+  are never floaters. A piece that touches the ground only diagonally (a corner contact) is a floater too: it is the
+  typical stubborn voxel stuck on a slope, and it is removed like the others.
+- **Dig safety**: before any dig is planned it is dry-run on a scratch copy of the field with the real edit
+  function (`ApplyEditSet`, inactive blocks seeded): it is accepted only if every sample it changes is a floater
+  sample, or air (density >= 0) with no solid non-floater sample in its 26-neighbourhood, and every floater sample
+  ends up air. The smallest ball covering the floater is tried first; if it would bite the ground the floater is
+  split along its longest axis and each half is covered separately, down to one dig per sample (smallest valid
+  radius). A floater with no safe sequence is skipped and counted in `left`. Floaters whose digs only touch each
+  other (neighbouring floaters) are planned together.
+- The Smooth checkbox runs the same pass at the end of a Smooth stroke over the floaters having a sample within one
+  voxel of one of the stroke's dabs; its digs carry the stroke's id, so Undo takes the stroke and the digs together.
+- Code: `src/noggit/everwood/VoxelFloaters.{hpp,cpp}` (pure C++), `EverwoodLayer::planFloaters`,
+  `EverwoodTool::removeFloaters`.
+
+## Ramp / Path
+A ground path set with the mouse, levelled to the wanted grade. The tool emits ordinary edits the game already
+replays: mode 6 (LEVEL, with a soft bank) along the path, optionally followed by mode 2 (smooth, 1 pass, 50 %).
+- LEVEL clamps the field into a window around a horizontal plane (`param` = plane offset in cm from `pos.z`, bits
+  12-13 the bank slope, bits 14-15 the core size): flat inside the dab's core, a bank of the chosen slope out to its
+  radius, so it cuts high ground and fills low ground. Dabs laid along the path, each with the plane height of its
+  place, make the slope. A later dab overwrites an earlier one inside its core, so a dab's plane is the path height
+  one core radius behind it and the dabs run one core radius past the end: the surface is exactly the requested
+  line from the first to the last point (a short flat landing follows the last point). Pass 1: two bank tracks
+  just outside the flat strip (radius 2 x the bank width: 2 / 4 / 8 yd for Sharp / Normal / Soft); pass 2: the flat
+  strip with small dabs (radius Width / 2 within 2..6 yd) on an odd number of tracks across it, the centre line
+  included; dabs are spaced 0.6-0.8 core radii. Where the ground is farther from the plane than a dab's vertical box
+  (pos.z +- radius), the dab is stacked (same plane and xy, one per vertical slab) so a deep cut or fill is reached.
+- Limits: path 2..300 yd, at most 700 edits, width 1..32 yd, every radius <= 16 yd. A 20 yd ramp of width 6 is about
+  70-100 edits (a deep cut with Sharp banks needs more).
+- Measured with the smoke test (`expect_ramp_line`): surface within 0.17 yd of the requested line on a 14 degree
+  ramp in a hillside, 0.12 yd on a 12 degree fixed-angle ramp, 0.07 yd on an 8 degree falling polyline.
+- Code: `EverwoodTool::rampEdits`, `drawRamp` (the live preview: centre line, flat edges, bank edges).
 
 ## Painting voxel ground
 
@@ -180,6 +225,13 @@ smooth|linear|flat`, `set erase 0|1`, `set reveal 0|1`; `paint_ray ox oy oz dx d
 last edit's position), `paint_rel ...` (paint_ray from the anchor), `camera_anchor dist height [side]`,
 `camera_look cx cy cz tx ty tz` (both relative to the anchor), `expect_painted [>]n`, `phash_save <name>`,
 `phash_same <name>`, `phash_differs <name>`; `status` also prints the painted chunks and the paint hash.
+Remove floaters / Ramp: `set floaters 0|1` (Smooth checkbox), `set floater_max <n>`, `remove_floaters [max]`,
+`expect_floaters <n|>n> [max]`, `list_floaters [max]`, `floater_snap <name> [max]` + `expect_floater_removal <name>`
+(floater samples gone, every other solid sample byte-identical, nothing lowered), `expect_solid x y z [0|1]`;
+`set tool ramp`, `set ramp_width|ramp_slope follow|angle|ramp_angle|ramp_edge sharp|normal|soft|ramp_smooth`,
+`ramp_point x y [z]` (WoW axes; z = the surface when omitted), `ramp_apply [ok|refused]`, `ramp_cancel`,
+`expect_ramp_line follow|<deg> <tol> [skip]` (the surface along the last ramp's centre line), `surface_line x0 y0 z0
+x1 y1 z1 tol [skip]`.
 `seed_journal <file> [MapDirectory]` (before `map`; default `Azeroth`) makes the project's `.mvoxj` a copy of
 `<file>`, so a script can start from the edits a previous session left behind.
 

@@ -105,6 +105,11 @@ namespace Noggit::Everwood::Voxel
   constexpr uint16_t SHAPE_SHIFT = 9;
   constexpr uint16_t SHAPE_MASK = 0x3 << SHAPE_SHIFT;
 
+  // CONTRACT v3.11: param bits 9-10 on mode 2 = smooth passes 1/2/4/8.
+  constexpr uint16_t SMOOTH_PASSES_SHIFT = 9;
+  constexpr uint16_t SMOOTH_PASSES_MASK = 0x3 << SMOOTH_PASSES_SHIFT;
+  inline uint16_t WithSmoothPasses(uint16_t param, uint8_t passesCode) { return uint16_t((param & ~SMOOTH_PASSES_MASK) | (uint16_t(passesCode & 3) << SMOOTH_PASSES_SHIFT)); }
+
   uint8_t ShapeOfParam(uint16_t param);
   float ShapeDist(uint8_t shape, float dx, float dy, float dz);
   uint16_t SoftParam(uint8_t falloff, uint8_t hardness);
@@ -135,6 +140,8 @@ namespace Noggit::Everwood::Voxel
     bool Soft(SoftBrush& b) const { return mode <= MODE_SMOOTH && SoftBrush::FromParam(param, b); }
     bool Dithered() const { SoftBrush b; return Soft(b) && (param & ROUND_MASK) == ROUND_DITHER; }   // v3.9
     uint32_t DitherSeed() const;                // v3.9 world.rs dither_seed
+    // CONTRACT v3.11: Jacobi pass count of a smooth (param bits 9-10 = 1/2/4/8); 1 for every other mode.
+    uint32_t SmoothPasses() const { return mode == MODE_SMOOTH ? (1u << ((param & SMOOTH_PASSES_MASK) >> SMOOTH_PASSES_SHIFT)) : 1u; }
     uint8_t Shape() const { return mode <= MODE_BUILD ? ShapeOfParam(param) : SHAPE_SPHERE; }
     // Smooth and every soft edit read samples they do not write (the canonical rebuild closure rule).
     bool ReadsNeighbours() const { SoftBrush b; return mode == MODE_SMOOTH || (mode <= MODE_BUILD && Soft(b)); }

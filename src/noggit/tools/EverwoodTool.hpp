@@ -60,7 +60,10 @@ namespace Noggit
     void beginEmpty(EverwoodStrokeConfig const& config);
     void update(uint64_t nowMs, Sample sample, std::vector<Sample>& out);
     void tick(uint64_t nowMs, std::vector<Sample>& out);
-    void end(uint64_t nowMs, std::optional<Sample> sample, std::vector<Sample>& out);
+    // Release. A stationary cursor (cursorMoved = false) adds no new input: a sample still held back is only a
+    // re-aim onto the surface this stroke already changed, so it is dropped (softenOnly keeps a held-back
+    // Push/Pull softening pass, which is part of the one dab).
+    void end(uint64_t nowMs, std::optional<Sample> sample, std::vector<Sample>& out, bool cursorMoved = true, bool softenOnly = false);
     bool active() const { return _active; }
 
   private:
@@ -80,7 +83,7 @@ namespace Noggit
   class EverwoodTool final : public Tool
   {
   public:
-    enum class Kind { Sculpt = 0, Flatten = 1, Bridge = 2, Paint = 3, Flow = 4 };
+    enum class Kind { Sculpt = 0, Flatten = 1, Bridge = 2, Paint = 3, Flow = 4, Ramp = 5 };
     enum class SculptMode { Dig = 0, Build = 1, Smooth = 2, Push = 3, Pull = 4 };
 
     explicit EverwoodTool(MapView* mapView);
@@ -113,6 +116,16 @@ namespace Noggit
     void confirmBridge();
     void cancelBridge();
     void setBridgePoint(glm::vec3 const& wow);
+    // Remove floaters (VoxelFloaters.hpp): the whole edited area, one stroke = one undo step. Returns the status text
+    // ("Removed 7 floaters (31 edits)").
+    std::string removeFloaters();
+    // Ramp / Path: points of the path (WoW axes); confirmRamp turns them into ordinary LEVEL / smooth edits, one
+    // stroke = one undo step. confirmRamp returns an empty string when it built the ramp, else why it did not.
+    void addRampPoint(glm::vec3 const& wow);
+    std::string confirmRamp();
+    void cancelRamp();
+    size_t rampPointCount() const { return _rampPoints.size(); }
+    size_t lastRampEdits() const { return _lastRampEdits; }
     // One scripted stroke of exact edits, as the mouse would have produced them.
     void applyStroke(std::vector<Everwood::Voxel::Edit> const& edits);
     // Paint (caves): one dab where a ray meets the voxel surface (WoW axes), through the tool's own checks.
@@ -134,6 +147,10 @@ namespace Noggit
     // CONTRACT v3.10 mode 7 at hit + 0.5 yd * normal (the air side); nullopt + why when the hit is refused.
     std::optional<Edit> paintSample(Everwood::AimHit const& hit, QString* why);
     bool paintRefused(Edit const& e, QString* why);
+    // Tablet pressure 0..1 for this sample (1 when "Use tablet pressure" is off or no tablet is active).
+    float pressureScale() const;
+    // Paint (caves) spray: one due dab -> `_sprayDensity` small dabs scattered in a disc on the aimed surface plane.
+    void sprayDabs(Edit const& dab, std::vector<Edit>& out);
     void setPaintTexture(int id);
     bool selectPaintText(QString const& text);
     void setHint(QString const& text);
@@ -143,6 +160,14 @@ namespace Noggit
     void flowEnd();
     void flowApply(glm::vec3 const& centreWow, glm::vec2 const& dirWow, std::optional<float> hitWaterZ);
     void renderFlow(glm::mat4x4 const& mvp);
+
+    // Ramp / Path (EVERWOOD-MODE.md): the edit scheme lives in rampEdits.
+    struct RampPath;
+    std::vector<Edit> rampEdits(std::vector<glm::vec3> const& points, QString* why) const;
+    bool rampGround(float x, float y, float zHint, float& z) const;
+    void drawRamp(glm::mat4x4 const& mvp);
+    void extendFloaterBox(Edit const& e);
+    void removeFloatersUnderBrush();
 
     void beginStroke(Everwood::AimHit const& hit);
     void endStroke();
@@ -176,6 +201,9 @@ namespace Noggit
     uint8_t _falloff = Everwood::Voxel::FALLOFF_SMOOTH;
     float _hardness = 0.f;
     bool _hard = false;
+    int _smoothPasses = 2;         // CONTRACT v3.11 pass code: 0..3 = 1 / 2 / 4 / 8 passes (default 4)
+    bool _usePressure = true;      // multiply the sculpt strength / paint opacity by the tablet pressure
+    float _fakePressure = 0.f;     // smoke only: 0 = off, else the pressure to pretend a tablet reports
     uint8_t _shape = Everwood::Voxel::SHAPE_SPHERE;
     float _offset = 0.f;
     int _pushEdge = 0;             // 0 hard edge, 1 smooth, 2 linear
@@ -190,6 +218,11 @@ namespace Noggit
     float _paintRadius = 3.f;
     float _paintOpacity = 30.f;
     uint8_t _paintFalloff = Everwood::Voxel::FALLOFF_SMOOTH;
+    int _paintHard = -1;           // CONTRACT v3.11 HARD core: -1 off (falloff), 0..3 = core 25 / 50 / 75 / 90 %
+    bool _spray = false;           // Paint (caves) spray (Noggit only: ordinary mode-7 dabs)
+    float _spraySize = 4.f;        // yd: radius of the scatter disc
+    int _sprayDensity = 6;         // dabs per due dab
+    uint32_t _sprayState = 0x9E3779B9u;   // xorshift32, reseeded per stroke
     bool _paintErase = false;
     bool _paintReveal = false;
     bool _actionOpen = false;
@@ -212,8 +245,30 @@ namespace Noggit
     float _flattenPlane = 0.f;
     std::optional<glm::vec3> _lastCentre;
     bool _softenNext = false;
+    std::pair<glm::vec3, glm::vec3> _cursorRay{};
+    std::optional<std::pair<glm::vec3, glm::vec3>> _sentRay;
+    uint64_t _strokeStartMs = 0;
+    int _strokeTicks = 0;
 
     std::optional<glm::vec3> _bridgeA, _bridgeB;
+
+    // Remove floaters
+    int _floaterMax = 64;                  // voxels (0.5 yd each)
+    bool _smoothFloaters = true;           // Sculpt > Smooth: also remove the floaters under the brush at stroke end
+    bool _floaterBoxValid = false;         // the current smooth stroke's lattice box (Everwood::Voxel lattice, inclusive)
+    Everwood::Voxel::Key _floaterLo{ 0, 0, 0 }, _floaterHi{ 0, 0, 0 };
+    std::vector<std::array<float, 4>> _floaterBalls;   // the stroke's smooth dabs (lattice centre, radius)
+    QString _floaterText;
+
+    // Ramp / Path
+    std::vector<glm::vec3> _rampPoints;    // WoW axes, the clicked ground points
+    float _rampWidth = 6.f;                // yd, the flat width of the path
+    int _rampSlope = 0;                    // 0 follow the clicked points' heights, 1 fixed angle
+    float _rampAngle = 12.f;               // deg (fixed angle mode): + rises along the path, - falls
+    int _rampEdge = 1;                     // edge softness: 0 sharp, 1 normal, 2 soft
+    float _rampStrength = 100.f;           // %
+    bool _rampSmooth = true;               // a light smooth along the strip after the levelling
+    size_t _lastRampEdits = 0;
     std::optional<Everwood::AimHit> _aim;
     glm::vec3 _viewDirWow{ 0.f, 0.f, -1.f };
 
@@ -235,6 +290,15 @@ namespace Noggit
     QDoubleSpinBox* _archBox = nullptr;
     QDoubleSpinBox* _thicknessBox = nullptr;
     QLabel* _bridgeLabel = nullptr;
+    QDoubleSpinBox* _rampWidthBox = nullptr;
+    QComboBox* _rampSlopeBox = nullptr;
+    QDoubleSpinBox* _rampAngleBox = nullptr;
+    QComboBox* _rampEdgeBox = nullptr;
+    QCheckBox* _rampSmoothBox = nullptr;
+    QCheckBox* _smoothFloatersBox = nullptr;
+    QDoubleSpinBox* _floaterMaxBox = nullptr;
+    QWidget* _floaterBox = nullptr;        // Max floater size + Remove floaters + its result line
+    QLabel* _floaterLabel = nullptr;
     QPushButton* _confirmButton = nullptr;
     QPushButton* _cancelButton = nullptr;
     QLabel* _status = nullptr;
@@ -245,6 +309,12 @@ namespace Noggit
     QPushButton* _paintPickButton = nullptr;
     QDoubleSpinBox* _opacityBox = nullptr;
     QComboBox* _paintFalloffBox = nullptr;
+    QComboBox* _passesBox = nullptr;
+    QComboBox* _paintHardBox = nullptr;
+    QCheckBox* _pressureBox = nullptr;
+    QCheckBox* _sprayBox = nullptr;
+    QDoubleSpinBox* _spraySizeBox = nullptr;
+    QDoubleSpinBox* _sprayDensityBox = nullptr;
     QCheckBox* _eraseBox = nullptr;
     QCheckBox* _revealBox = nullptr;
     QWidget* _flowBox = nullptr;

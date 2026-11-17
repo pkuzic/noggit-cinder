@@ -42,13 +42,16 @@
 #include <QtGui/QImage>
 #include <QtGui/QMouseEvent>
 #include <QtWidgets/QApplication>
+namespace Noggit::Everwood { std::string profileText(bool reset); }
 #include <QtWidgets/QDialog>
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <array>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -509,6 +512,230 @@ namespace Noggit::Everwood
         tool->setBridgePoint(glm::vec3(f(4), f(5), f(6)));
         tool->confirmBridge();
       }
+      else if (cmd == "remove_floaters")
+      {
+        // remove_floaters [max]: the panel's "Remove floaters" button (whole edited area, one undo step)
+        auto* tool = requireTool();
+        if (a.size() > 1)
+          tool->setOption("floater_max", a.value(1));
+        report("remove_floaters: " + tool->removeFloaters());
+      }
+      else if (cmd == "expect_floaters")
+      {
+        // expect_floaters <n|>n> [max]: floaters in the edited area (touching ones included)
+        uint32_t const max = a.size() > 2 ? a.value(2).toUInt() : 64u;
+        size_t const n = requireTool()->layer()->findFloaters(max, Noggit::Everwood::Voxel::FloaterRegion{}).size();
+        bool const atLeast = a.value(1).startsWith('>');
+        size_t const want = a.value(1).mid(atLeast ? 1 : 0).toULongLong();
+        expect(atLeast ? n > want : n == want, "floaters " + std::to_string(n) + " vs " + a.value(1).toStdString());
+      }
+      else if (cmd == "list_floaters")
+      {
+        // list_floaters [max]: each floater's size and centre (wow axes), diagnostics
+        uint32_t const max = a.size() > 1 ? a.value(1).toUInt() : 64u;
+        int n = 0;
+        for (auto const& fl : requireTool()->layer()->findFloaters(max, Noggit::Everwood::Voxel::FloaterRegion{}))
+        {
+          double c[3] = { 0, 0, 0 };
+          for (auto const& s : fl.samples)
+            for (int i = 0; i < 3; ++i)
+              c[i] += double(s[i]) * 0.5 / double(fl.samples.size());
+          char b[160];
+          std::snprintf(b, sizeof(b), "floater %d: %zu samples at %.2f %.2f %.2f%s", n++, fl.samples.size(), c[0], c[1], c[2], fl.touching ? " (touching)" : "");
+          report(b);
+        }
+      }
+      else if (cmd == "floater_snap")
+      {
+        // floater_snap <name> [max]: every density sample + the samples of the current floaters
+        uint32_t const max = a.size() > 2 ? a.value(2).toUInt() : 64u;
+        auto* layer = requireTool()->layer();
+        FloaterSnap snap;
+        snap.chunks = layer->field().ChunksRef();
+        size_t floaters = 0;
+        for (auto const& f : layer->findFloaters(max, Noggit::Everwood::Voxel::FloaterRegion{}))
+        {
+          ++floaters;
+          for (auto const& s : f.samples)
+            snap.floater.insert(s);
+        }
+        report("floater_snap " + a.value(1).toStdString() + ": " + std::to_string(snap.chunks.size()) + " chunks, " + std::to_string(floaters)
+               + " floaters, " + std::to_string(snap.floater.size()) + " floater samples");
+        _snaps[a.value(1).toStdString()] = std::move(snap);
+      }
+      else if (cmd == "expect_floater_removal")
+      {
+        // expect_floater_removal <name>: against floater_snap: every floater sample is air now, every sample that was solid
+        // and is not a floater sample is byte-identical, and nothing outside the floaters was lowered (only the air next to
+        // a floater may have been raised)
+        auto it = _snaps.find(a.value(1).toStdString());
+        if (it == _snaps.end())
+        {
+          expect(false, "expect_floater_removal: no snapshot " + a.value(1).toStdString());
+          return true;
+        }
+        namespace V = Noggit::Everwood::Voxel;
+        auto& world = requireTool()->layer()->field();
+        FloaterSnap const& snap = it->second;
+        size_t notRemoved = 0, solidChanged = 0, airChanged = 0, lowered = 0, inFloater = 0, samples = 0;
+        for (auto const& [k, now] : world.ChunksRef())
+        {
+          auto before = snap.chunks.find(k);
+          std::shared_ptr<V::ColumnSeed const> seed;
+          if (before == snap.chunks.end())
+            seed = world.Seed(V::ColKey{ k[0], k[1] });
+          for (int32_t z = 0; z < V::C; ++z)
+            for (int32_t y = 0; y < V::C; ++y)
+              for (int32_t x = 0; x < V::C; ++x)
+              {
+                int8_t const nv = now[V::owned_index(x, y, z)];
+                int32_t const gx = k[0] * V::C + x, gy = k[1] * V::C + y, gz = k[2] * V::C + z;
+                int8_t const bv = before != snap.chunks.end() ? before->second[V::owned_index(x, y, z)] : seed->Value(gx, gy, gz);
+                ++samples;
+                bool const fl = snap.floater.count(V::Key{ gx, gy, gz }) != 0;
+                if (fl && nv < 0)
+                  ++notRemoved;
+                if (nv == bv)
+                  continue;
+                if (fl)
+                {
+                  ++inFloater;
+                  continue;
+                }
+                if (bv < 0)
+                  ++solidChanged;
+                else
+                  ++airChanged;
+                if (nv < bv)
+                  ++lowered;
+              }
+        }
+        report("floater removal check: " + std::to_string(samples) + " samples, floater samples changed " + std::to_string(inFloater)
+               + ", still solid " + std::to_string(notRemoved) + ", solid ground changed " + std::to_string(solidChanged)
+               + ", air changed outside " + std::to_string(airChanged) + " (lowered " + std::to_string(lowered) + ")");
+        expect(notRemoved == 0 && solidChanged == 0 && lowered == 0, "floaters gone, no ground changed");
+      }
+      else if (cmd == "expect_solid")
+      {
+        // expect_solid <wow x> <wow y> <wow z> [1|0]: the field's sample nearest that point is solid (density < 0) or not
+        auto& world = requireTool()->layer()->field();
+        int const v = world.Sample(int32_t(std::lround(f(1) / 0.5f)), int32_t(std::lround(f(2) / 0.5f)), int32_t(std::lround(f(3) / 0.5f)));
+        bool const want = a.size() > 4 ? a.value(4).toInt() != 0 : true;
+        expect((v < 0) == want, "sample at " + a.value(1).toStdString() + " " + a.value(2).toStdString() + " " + a.value(3).toStdString()
+               + " = " + std::to_string(v) + (want ? " is solid" : " is not solid"));
+      }
+      else if (cmd == "ramp_point")
+      {
+        // ramp_point <wow x> <wow y> [wow z]: a path point of the Ramp / Path tool; z = the surface when omitted
+        auto* tool = requireTool();
+        float z = 0.f;
+        if (a.size() > 3)
+          z = f(3);
+        else if (auto const hit = tool->layer()->raycast(glm::vec3(f(1), f(2), 900.f), glm::vec3(0.f, 0.f, -1.f), 2000.f))
+          z = hit->pos.z;
+        else
+          tool->layer()->rawGround(f(1), f(2), z);
+        tool->addRampPoint(glm::vec3(f(1), f(2), z));
+        _rampLog.push_back(glm::vec3(f(1), f(2), z));
+        report("ramp point " + std::to_string(f(1)) + " " + std::to_string(f(2)) + " " + std::to_string(z));
+      }
+      else if (cmd == "ramp_apply")
+      {
+        // ramp_apply [ok|refused]: the "Build ramp" button
+        auto* tool = requireTool();
+        std::string const why = tool->confirmRamp();
+        if (why.empty())
+          _lastRamp = _rampLog;
+        _rampLog.clear();
+        report(why.empty() ? "ramp built, " + std::to_string(tool->lastRampEdits()) + " edits" : "ramp refused: " + why);
+        if (a.size() > 1)
+          expect(why.empty() == (a.value(1) == "ok"), "ramp_apply " + a.value(1).toStdString());
+      }
+      else if (cmd == "ramp_cancel")
+      {
+        requireTool()->cancelRamp();
+        _rampLog.clear();
+      }
+      else if (cmd == "expect_ramp_line")
+      {
+        // expect_ramp_line follow|<deg> <tol> [skip]: the voxel surface (a ray straight down) along the last built ramp's
+        // centre line (the clicked points' polyline; 'follow' = linear between the clicked heights, a number = that fixed
+        // grade in degrees from the first point), every yard, ends left out by skip yd. Passes within tol yd.
+        auto* layer = requireTool()->layer();
+        if (_lastRamp.size() < 2)
+        {
+          expect(false, "expect_ramp_line: no ramp was built");
+          return true;
+        }
+        bool const follow = a.value(1) == "follow";
+        float const tanA = std::tan(a.value(1).toFloat() * 0.017453292f), tol = f(2), skip = f(3);
+        std::vector<float> s{ 0.f };
+        for (size_t i = 1; i < _lastRamp.size(); ++i)
+          s.push_back(s.back() + glm::distance(glm::vec2(_lastRamp[i]), glm::vec2(_lastRamp[i - 1])));
+        float worst = 0.f, bias = 0.f;
+        int count = 0;
+        std::string profile;
+        for (float u = skip; u <= s.back() - skip + 1e-3f; u += 1.f)
+        {
+          size_t i = 0;
+          while (i + 2 < _lastRamp.size() && u > s[i + 1])
+            ++i;
+          float const t = (u - s[i]) / (s[i + 1] - s[i]);
+          glm::vec3 const q = _lastRamp[i] + (_lastRamp[i + 1] - _lastRamp[i]) * t;
+          float const want = follow ? q.z : _lastRamp[0].z + u * tanA;
+          auto const hit = layer->raycast(glm::vec3(q.x, q.y, std::max(want, q.z) + 60.f), glm::vec3(0.f, 0.f, -1.f), 400.f);
+          if (!hit)
+          {
+            expect(false, "expect_ramp_line: no surface at " + std::to_string(q.x) + " " + std::to_string(q.y));
+            return true;
+          }
+          float const err = hit->pos.z - want;
+          worst = std::max(worst, std::fabs(err));
+          bias += err;
+          ++count;
+          char b[48];
+          std::snprintf(b, sizeof(b), "%.0f:%+.2f ", double(u), double(err));
+          if (count % 2 == 1)
+            profile += b;
+        }
+        report("ramp line error (yd, surface minus requested) " + profile);
+        expect(count > 0 && worst <= tol, "ramp surface within " + std::to_string(tol) + " yd of the requested slope over " + std::to_string(count)
+               + " points: worst " + std::to_string(worst) + ", mean " + std::to_string(count ? bias / float(count) : 0.f));
+      }
+      else if (cmd == "surface_line")
+      {
+        // surface_line <x0> <y0> <z0> <x1> <y1> <z1> <tol> [skip]: the voxel surface (a ray straight down) along the
+        // line, against the straight line from z0 to z1 (skip yd at both ends left out); passes within tol yd
+        auto* layer = requireTool()->layer();
+        glm::vec3 const p0(f(1), f(2), f(3)), p1(f(4), f(5), f(6));
+        float const tol = f(7), skip = f(8);
+        float const len = glm::distance(glm::vec2(p0), glm::vec2(p1));
+        float worst = 0.f, bias = 0.f;
+        int count = 0;
+        std::string profile;
+        for (float s = skip; s <= len - skip + 1e-3f; s += 1.f)
+        {
+          float const t = len > 0.f ? s / len : 0.f;
+          glm::vec3 const q = p0 + (p1 - p0) * t;
+          auto const hit = layer->raycast(glm::vec3(q.x, q.y, std::max(p0.z, p1.z) + 60.f), glm::vec3(0.f, 0.f, -1.f), 400.f);
+          if (!hit)
+          {
+            expect(false, "surface_line: no surface at " + std::to_string(q.x) + " " + std::to_string(q.y));
+            return true;
+          }
+          float const err = hit->pos.z - q.z;
+          worst = std::max(worst, std::fabs(err));
+          bias += err;
+          ++count;
+          char b[48];
+          std::snprintf(b, sizeof(b), "%.1f:%+.2f ", double(s), double(err));
+          if (count % 2 == 1)
+            profile += b;
+        }
+        report("surface_line error (yd, surface minus requested) " + profile);
+        expect(count > 0 && worst <= tol, "surface within " + std::to_string(tol) + " yd of the requested line over " + std::to_string(count)
+               + " points: worst " + std::to_string(worst) + ", mean " + std::to_string(count ? bias / float(count) : 0.f));
+      }
       else if (cmd == "ground")
       {
         float h = 0.f;
@@ -600,6 +827,39 @@ namespace Noggit::Everwood
         bool const atLeast = a.value(1).startsWith('>');
         size_t const want = a.value(1).mid(atLeast ? 1 : 0).toULongLong();
         expect(atLeast ? n > want : n == want, "live edits " + std::to_string(n) + " vs " + a.value(1).toStdString());
+      }
+      else if (cmd == "last_edit" || cmd == "expect_last")
+      {
+        // last_edit: print the newest live edit. expect_last <mode|-> <strength|-> <param hex|-> [mask hex]: check it
+        auto const* le = requireTool()->layer()->lastEdit();
+        if (!le)
+        {
+          expect(false, cmd.toStdString() + ": no edit");
+          return true;
+        }
+        char b[160];
+        std::snprintf(b, sizeof(b), "last edit mode %u strength %u radius %.2f param 0x%04x pos %.2f %.2f %.2f", unsigned(le->mode),
+                      unsigned(le->strength), double(le->radius), unsigned(le->param), double(le->pos[0]), double(le->pos[1]), double(le->pos[2]));
+        report(b);
+        if (cmd == "expect_last")
+        {
+          bool ok = true;
+          if (a.value(1) != "-")
+            ok = ok && unsigned(le->mode) == a.value(1).toUInt();
+          if (a.value(2) != "-")
+          {
+            // strength: exact, or "<=N" / ">=N"
+            QString const t = a.value(2);
+            unsigned const v = t.mid(t.startsWith('<') || t.startsWith('>') ? 2 : 0).toUInt();
+            ok = ok && (t.startsWith("<=") ? le->strength <= v : (t.startsWith(">=") ? le->strength >= v : le->strength == v));
+          }
+          if (a.value(3) != "-")
+          {
+            unsigned const mask = a.size() > 4 ? a.value(4).toUInt(nullptr, 0) : 0xffffu;
+            ok = ok && (unsigned(le->param) & mask) == (a.value(3).toUInt(nullptr, 0) & mask);
+          }
+          expect(ok, std::string(b));
+        }
       }
       else if (cmd == "expect_hidden")
       {
@@ -743,6 +1003,10 @@ namespace Noggit::Everwood
       else if (cmd == "everwood_tool")
       {
         _view->set_editing_mode(editing_mode::everwood);
+      }
+      else if (cmd == "prof")
+      {
+        report("prof\n" + Noggit::Everwood::profileText(a.value(1) != "keep"));
       }
       else if (cmd == "shift")
       {
@@ -942,6 +1206,13 @@ namespace Noggit::Everwood
     float _scratch = 0.f;
     glm::vec3 _anchor{ 0.f };
     std::map<std::string, std::string> _hashes;
+    struct FloaterSnap
+    {
+      Noggit::Everwood::Voxel::Chunks chunks;
+      std::set<std::array<int32_t, 3>> floater;
+    };
+    std::map<std::string, FloaterSnap> _snaps;
+    std::vector<glm::vec3> _rampLog, _lastRamp;
 
     int _left = 2580, _top = 20, _width = 1500, _height = 950;
 

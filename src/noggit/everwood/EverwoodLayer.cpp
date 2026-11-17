@@ -38,8 +38,31 @@
 #include <map>
 #include <sstream>
 
+#include <chrono>
+#include <optional>
 namespace Noggit::Everwood
 {
+  // Frame-time probes (smoke "prof"): milliseconds and counts per named section.
+  struct ProfSlot { double ms = 0; long n = 0; };
+  static std::map<std::string, ProfSlot> g_prof;
+  struct ProfScope
+  {
+    char const* name; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    explicit ProfScope(char const* n) : name(n) {}
+    ~ProfScope() { auto& s = g_prof[name]; s.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); ++s.n; }
+  };
+  std::string profileText(bool reset)
+  {
+    std::string out;
+    for (auto const& kv : g_prof)
+    {
+      char b[160]; std::snprintf(b, sizeof b, "  %-22s n=%-6ld total %9.2f ms  avg %8.3f ms\n", kv.first.c_str(), kv.second.n, kv.second.ms, kv.second.n ? kv.second.ms / kv.second.n : 0.0);
+      out += b;
+    }
+    if (reset) g_prof.clear();
+    return out;
+  }
+
   namespace
   {
     using namespace Voxel;
@@ -397,14 +420,23 @@ namespace Noggit::Everwood
 
     if (IsPaint3(edit))
     {
+      ProfScope p("ApplyPaint3");
       notePaintChanged(_field.ApplyPaint3(edit));
       return;
     }
 
+    ProfScope p_all("addEdit");
     std::vector<Key> added;
-    std::vector<Key> const changed = _field.ApplyEdit(edit, &added);
+    std::vector<Key> changed;
+    {
+      ProfScope p("ApplyEdit");
+      changed = _field.ApplyEdit(edit, &added);
+    }
     noteChanged(changed, &added);
-    flushColumns();
+    {
+      ProfScope p("flushColumns");
+      flushColumns();
+    }
   }
 
   void EverwoodLayer::endStroke()
@@ -532,7 +564,7 @@ namespace Noggit::Everwood
           {
             Key const n{ k[0] + dx, k[1] + dy, k[2] + dz };
             if (_field.IsActive(n))
-              _dirtyMeshes.insert(n);
+              _softMeshes.insert(n);
           }
     };
     for (Key const& k : keys)
@@ -546,14 +578,16 @@ namespace Noggit::Everwood
   {
     // A mesh's paint weights read its own chunk and one sample of each neighbour (the window apron).
     for (Key const& k : keys)
+    {
       for (int dz = -1; dz <= 1; ++dz)
         for (int dy = -1; dy <= 1; ++dy)
           for (int dx = -1; dx <= 1; ++dx)
           {
             Key const n{ k[0] + dx, k[1] + dy, k[2] + dz };
             if (_field.IsActive(n))
-              _dirtyMeshes.insert(n);
+              _softMeshes.insert(n);
           }
+    }
   }
 
   float EverwoodLayer::editedWeightAt(AimHit const& hit)
@@ -722,6 +756,8 @@ namespace Noggit::Everwood
     // filter reaches 2 lattice cells) needs a new mesh, at ALL heights - not only the chunks the edit touched.
     // Else ground meshed before a ledge was built 2+ chunks above it stays empty under the ledge: a hole.
     std::vector<ColKey> moved;
+    std::optional<ProfScope> pf;
+    pf.emplace("fc.recompute");
     for (ColKey const& col : _dirtyColumns)
     {
       auto const before = _columns.find(col);
@@ -732,6 +768,7 @@ namespace Noggit::Everwood
       if (now.any != oldAny || (now.any && now.changed != old))
         moved.push_back(col);
     }
+    pf.emplace("fc.moved");
     if (!moved.empty())
     {
       std::set<ColKey> around;
@@ -741,11 +778,13 @@ namespace Noggit::Everwood
             around.insert(ColKey{ col[0] + dx, col[1] + dy });
       for (auto const& kv : _field.ChunksRef())
         if (around.count(ColKey{ kv.first[0], kv.first[1] }))
-          _dirtyMeshes.insert(kv.first);
+          _softMeshes.insert(kv.first);
     }
+    pf.emplace("fc.mask");
     for (ColKey const& col : _dirtyColumns)
       writeMaskAround(col);
     _dirtyColumns.clear();
+    pf.emplace("fc.bounds");
 
     // The box the cursor looks for the voxel surface in.
     _editedMin = glm::vec3(std::numeric_limits<float>::max());
@@ -759,6 +798,7 @@ namespace Noggit::Everwood
       _editedMin = glm::min(_editedMin, low);
       _editedMax = glm::max(_editedMax, low + glm::vec3(CHUNK_YARDS));
     }
+    pf.reset();
   }
 
   size_t EverwoodLayer::hiddenCellCount() const
@@ -1036,7 +1076,10 @@ namespace Noggit::Everwood
       kv.second.dirtyHi = MASK_SIZE - 1;
     }
     for (auto& kv : _meshes)
+    {
       kv.second.indexCount = 0;
+      kv.second.inputs.valid = false;
+    }
 
     rebuildJournal();
     _journal.TakePaint3Dirty();
@@ -1206,7 +1249,7 @@ namespace Noggit::Everwood
     shader.uniform("everwood_mask_origin", glm::vec2(it->second.origin));
   }
 
-  bool EverwoodLayer::buildMesh(Key const& key, ChunkGl& out)
+  bool EverwoodLayer::buildMesh(Key const& key, ChunkGl& out, bool soft)
   {
     // Which lattice cells of the window lie near a changed column: only those triangles are drawn, the real
     // terrain is drawn everywhere else. Unchanged chunk column and neighbours: nothing to show.
@@ -1226,33 +1269,103 @@ namespace Noggit::Everwood
         anyNear = true;
       }
 
-    out.indexCount = 0;
     if (!anyNear)
     {
+      out.inputs.valid = false;
+      out.indexCount = 0;
       out.keepAlive.clear();
       out.arrays.clear();
       out.sources.clear();
       return true;
     }
 
-    std::vector<int8_t> window(WINDOW);
-    _field.Window(key, window.data());
+    // The inputs of this build; an unchanged set (a neighbour's edit that never reached this window) keeps the
+    // mesh as it is.
+    MeshInputs in;
+    in.window.resize(WINDOW);
+    _field.Window(key, in.window.data());
+    in.seed.resize(size_t(SAMPLES) * SAMPLES);
+    _field.WindowSeedHeights(key, in.seed.data());
+    in.nearChanged = nearChanged;
+    {
+      // The paint the mesh reads: its own chunk and the 1-sample apron of the neighbours.
+      ChunkPaint3 const* owners[27];
+      bool anyPaint = false;
+      for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+          for (int dx = -1; dx <= 1; ++dx)
+          {
+            ChunkPaint3 const* p = _field.PaintOf(Key{ key[0] + dx, key[1] + dy, key[2] + dz });
+            owners[(dx + 1) + 3 * (dy + 1) + 9 * (dz + 1)] = p;
+            if (p)
+            {
+              anyPaint = true;
+              for (uint16_t m : p->mats)
+                in.paintMats.push_back(m);
+            }
+            in.paintMats.push_back(0xFFFF);
+          }
+      if (anyPaint)
+      {
+        in.paintRgba.resize(WINDOW);
+        int32_t const lo[3] = { key[0] * C - 1, key[1] * C - 1, key[2] * C - 1 };
+        size_t at = 0;
+        for (int32_t lz = 0; lz < SAMPLES; ++lz)
+        {
+          int32_t const gz = lo[2] + lz;
+          int32_t const oz = chunk_of(gz);
+          int32_t const zl = gz - oz * C;
+          for (int32_t ly = 0; ly < SAMPLES; ++ly)
+          {
+            int32_t const gy = lo[1] + ly;
+            int32_t const oy = chunk_of(gy);
+            int32_t const yl = gy - oy * C;
+            for (int32_t lx = 0; lx < SAMPLES; ++lx, ++at)
+            {
+              int32_t const gx = lo[0] + lx;
+              int32_t const ox = chunk_of(gx);
+              ChunkPaint3 const* p = owners[(ox - key[0] + 1) + 3 * (oy - key[1] + 1) + 9 * (oz - key[2] + 1)];
+              uint32_t v = 0;
+              if (p)
+                std::memcpy(&v, p->Layer(size_t(zl)) + (size_t(gx - ox * C) + size_t(yl) * C) * 4, 4);
+              in.paintRgba[at] = v;
+            }
+          }
+        }
+      }
+    }
+    in.valid = true;
+    MeshDigest const digest = MeshDigest::Of(in);
+    if (soft && out.inputs == digest && out.vao)
+      return true;
+    out.inputs.valid = false;
+    out.indexCount = 0;
+
+    auto lapT = std::chrono::steady_clock::now();
+    auto lap = [&](char const* n)
+    {
+      auto const now = std::chrono::steady_clock::now();
+      auto& s = g_prof[n]; s.ms += std::chrono::duration<double, std::milli>(now - lapT).count(); ++s.n; lapT = now;
+    };
+    std::vector<int8_t>& window = in.window;
     Mesh mesh;
     SurfaceNets(window.data(), mesh);
+    lap("bm.window+nets");
     if (mesh.idx.empty())
     {
+      out.inputs = digest;
       out.keepAlive.clear();
       out.arrays.clear();
       out.sources.clear();
       return true;
     }
 
-    std::vector<float> seedHeights(size_t(SAMPLES) * SAMPLES);
-    _field.WindowSeedHeights(key, seedHeights.data());
+    std::vector<float>& seedHeights = in.seed;
     auto const origin = WindowOrigin(key);
     std::vector<float> edited, tilt;
     EditedWeights(mesh, window.data(), seedHeights.data(), origin[2], edited);
     SeedTiltCos(mesh, seedHeights.data(), tilt);
+    lap("bm.weights+tilt");
 
     // Every tile under the vertices must be in memory for its textures; come back later otherwise.
     size_t const nv = mesh.pos.size() / 3;
@@ -1433,6 +1546,7 @@ namespace Noggit::Everwood
       }
     }
 
+    lap("bm.paintWeights");
     std::vector<MeshVertex> shaped(nv);
     std::vector<uint8_t> vertexNear(nv, 0);
     for (size_t i = 0; i < nv; ++i)
@@ -1496,6 +1610,7 @@ namespace Noggit::Everwood
 
     // 0-19 as before; 20-23 the 3D paint's slot weights, 24-27 its slot layers (flat, encoded like the ground
     // layers: sampler slot * 4096 + array index, -1 = empty), filled in once the ground took its samplers.
+    lap("bm.shaped");
     constexpr size_t STRIDE = 28;
     constexpr size_t PAINT_IDS = 24;
     std::vector<float> vertices;
@@ -1670,6 +1785,7 @@ namespace Noggit::Everwood
           vertices[at + PAINT_IDS + k] = ids[k];
     }
 
+    lap("bm.vertices");
     out.boundsMin = bmin;
     out.boundsMax = bmax;
     out.indexCount = int(vertices.size() / STRIDE);
@@ -1705,6 +1821,8 @@ namespace Noggit::Everwood
     attrib(9, 4, PAINT_IDS);   // 3D paint slot layers
     gl.bindVertexArray(0);
     gl.bindBuffer(GL_ARRAY_BUFFER, 0);
+    lap("bm.upload");
+    out.inputs = digest;
     return true;
   }
 
@@ -1712,6 +1830,7 @@ namespace Noggit::Everwood
   {
     if (_journal.Edits().empty() && _meshes.empty())
       return;
+    ProfScope p_draw("draw");
 
     if (!_program)
     {
@@ -1732,6 +1851,8 @@ namespace Noggit::Everwood
 
     // Terrain painted, or otherwise recoloured, since the mesh was built: rebuild it from the chunks as they
     // are now. Nothing here touches the density.
+    std::optional<ProfScope> p_stamp;
+    p_stamp.emplace("stampCheck");
     for (auto const& kv : _meshes)
       for (ChunkSource const& source : kv.second.sources)
       {
@@ -1746,14 +1867,27 @@ namespace Noggit::Everwood
         }
       }
 
+    p_stamp.reset();
     // Everything edited since the last frame, and whatever waited for its tile.
     for (auto it = _dirtyMeshes.begin(); it != _dirtyMeshes.end();)
     {
       ChunkGl& mesh = _meshes[*it];
+      ProfScope p("buildMesh");
       if (buildMesh(*it, mesh))
+      {
+        _softMeshes.erase(*it);
         it = _dirtyMeshes.erase(it);
+      }
       else
         ++it;
+    }
+    for (auto it = _softMeshes.begin(); it != _softMeshes.end();)
+    {
+      ChunkGl& mesh = _meshes[*it];
+      ProfScope p("buildMesh.soft");
+      if (!buildMesh(*it, mesh, true))
+        _dirtyMeshes.insert(*it);   // waits for its tile: retried unconditionally
+      it = _softMeshes.erase(it);
     }
 
     math::frustum const frustum(mvp);
@@ -1806,6 +1940,7 @@ namespace Noggit::Everwood
     }
     mesh.vao = mesh.vbo = 0;
     mesh.indexCount = 0;
+    mesh.inputs.valid = false;
   }
 
   void EverwoodLayer::forgetGl()
@@ -1815,6 +1950,7 @@ namespace Noggit::Everwood
     {
       kv.second.vao = kv.second.vbo = 0;
       kv.second.indexCount = 0;
+      kv.second.inputs.valid = false;
       _dirtyMeshes.insert(kv.first);
     }
     for (auto& kv : _masks)

@@ -45,7 +45,7 @@ namespace Noggit::Everwood::Voxel
             if (!std::isfinite(v) || std::fabs(v) >= 40000.0f)
                 return false;
         return std::isfinite(radius) && radius > 0.0f && radius <= 16.0f && mode <= MODE_MAX
-            // CONTRACT v3.10: mode 7 caps the radius at 8 yd (8.0 valid, 8.5 invalid)
+            // CONTRACT v3.10 / v3.11: mode 7 caps the radius at PAINT3_MAX_RADIUS (8 yd in v3.10, 16 yd now)
             && (mode != MODE_PAINT3 || radius <= PAINT3_MAX_RADIUS);
     }
 
@@ -497,13 +497,16 @@ namespace Noggit::Everwood::Voxel
             return changed;
         }
 
-        // Smooth (hard or soft) + v3.3 soft lower / raise: Jacobi over the pre-edit gather (brush box + one
-        // read ring), across chunk borders.
+        // Smooth (hard or soft) + v3.3 soft lower / raise: Jacobi over the pre-edit gather (brush box + the read
+        // ring), across chunk borders. CONTRACT v3.11: a smooth runs N passes (param bits 9-10 = 1/2/4/8) in float
+        // over the brush samples only, rounded ONCE at the end; the gather is grown by N (only 1 ring is ever read).
         float const strength = float(e.strength) / 255.0f;
         int32_t const shiftDz = isSoft ? (e.mode == 0 ? 1 : (e.mode == 1 ? -1 : 0)) : 0;
         bool const dithered = e.Dithered();          // CONTRACT v3.9
         uint32_t const ditherSeed = dithered ? e.DitherSeed() : 0;
-        Key const glo{ lo[0] - 1, lo[1] - 1, lo[2] - 1 }, ghi{ hi[0] + 1, hi[1] + 1, hi[2] + 1 };
+        int32_t const passes = shiftDz != 0 ? 1 : int32_t(e.SmoothPasses());
+        int32_t const grow = passes;
+        Key const glo{ lo[0] - grow, lo[1] - grow, lo[2] - grow }, ghi{ hi[0] + grow, hi[1] + grow, hi[2] + grow };
         size_t const dim[3] = { size_t(ghi[0] - glo[0] + 1), size_t(ghi[1] - glo[1] + 1), size_t(ghi[2] - glo[2] + 1) };
         auto at = [&](int32_t x, int32_t y, int32_t z) -> size_t
         {
@@ -521,8 +524,10 @@ namespace Noggit::Everwood::Voxel
                         : outside(x, y, z);
                 }
         float const r2 = r * r;
-        std::unordered_set<Key, KeyHash> touched;
-        std::vector<Key> order;
+        // The brush: every sample of the box inside it (z, y, x order) with its blend `a`. A brush sample whose
+        // chunk is not in `set` still takes part in the passes (it is only not written): geometric, as the game.
+        struct BrushSample { int32_t x, y, z; float a; };
+        std::vector<BrushSample> brush;
         for (int32_t z = lo[2]; z <= hi[2]; ++z)
             for (int32_t y = lo[1]; y <= hi[1]; ++y)
                 for (int32_t x = lo[0]; x <= hi[0]; ++x)
@@ -543,39 +548,56 @@ namespace Noggit::Everwood::Voxel
                         if (d2 > r2)
                             continue;
                     }
-                    Key const k{ chunk_of(x), chunk_of(y), chunk_of(z) };
-                    auto it = set.find(k);
-                    if (it == set.end())
-                        continue;
-                    size_t const gi = at(x, y, z), sx = 1, sy = dim[0], sz = dim[0] * dim[1];
-                    float const old = float(grid[gi]);
-                    float nv;
-                    if (shiftDz != 0)
-                    {
-                        float const n = float(grid[shiftDz > 0 ? gi + sz : gi - sz]);
-                        nv = old + (n - old) * a;   // soft lower (+z) / raise (-z): moves the field by a voxels
-                    }
-                    else
-                    {
-                        float const avg = (float(grid[gi + sx]) + float(grid[gi - sx]) + float(grid[gi + sy]) + float(grid[gi - sy])
-                            + float(grid[gi + sz]) + float(grid[gi - sz])) / 6.0f;
-                        nv = isSoft ? old + (avg - old) * a : old * (1.0f - strength) + avg * strength;
-                    }
-                    // CONTRACT v3.9: a dithered soft edit rounds with the per-sample threshold
-                    int8_t const nw = dithered ? DitherRound(nv, DitherThreshold(ditherSeed, x, y, z)) : quantRaw(nv);
-                    int32_t const lx = x - k[0] * C, ly = y - k[1] * C, lz = z - k[2] * C;
-                    if (lx < 0 || lx >= C || ly < 0 || ly >= C || lz < 0 || lz >= C)
-                    {
-                        continue;                   // cannot happen (chunk_of); keeps the write provably in bounds
-                    }
-                    size_t const idx = owned_index(lx, ly, lz);
-                    if (nw != it->second[idx])
-                    {
-                        it->second[idx] = nw;
-                        if (touched.insert(k).second)
-                            order.push_back(k);
-                    }
+                    brush.push_back({ x, y, z, a });
                 }
+        size_t const sx = 1, sy = dim[0], sz = dim[0] * dim[1];
+        std::vector<float> cur(grid.size()), nxt;
+        for (size_t i = 0; i < grid.size(); ++i)
+            cur[i] = float(grid[i]);
+        nxt = cur;
+        for (int32_t pass = 0; pass < passes; ++pass)
+        {
+            for (BrushSample const& b : brush)
+            {
+                size_t const gi = at(b.x, b.y, b.z);
+                float const old = cur[gi];
+                float nv;
+                if (shiftDz != 0)
+                {
+                    float const n = cur[shiftDz > 0 ? gi + sz : gi - sz];
+                    nv = old + (n - old) * b.a;   // soft lower (+z) / raise (-z): moves the field by a voxels
+                }
+                else
+                {
+                    float const avg = (cur[gi + sx] + cur[gi - sx] + cur[gi + sy] + cur[gi - sy] + cur[gi + sz] + cur[gi - sz]) / 6.0f;
+                    nv = isSoft ? old + (avg - old) * b.a : old * (1.0f - strength) + avg * strength;
+                }
+                nxt[gi] = nv;
+            }
+            cur.swap(nxt);
+        }
+        std::unordered_set<Key, KeyHash> touched;
+        std::vector<Key> order;
+        for (BrushSample const& b : brush)
+        {
+            Key const k{ chunk_of(b.x), chunk_of(b.y), chunk_of(b.z) };
+            auto it = set.find(k);
+            if (it == set.end())
+                continue;
+            float const nv = cur[at(b.x, b.y, b.z)];
+            // CONTRACT v3.9: a dithered soft edit rounds with the per-sample threshold
+            int8_t const nw = dithered ? DitherRound(nv, DitherThreshold(ditherSeed, b.x, b.y, b.z)) : quantRaw(nv);
+            int32_t const lx = b.x - k[0] * C, ly = b.y - k[1] * C, lz = b.z - k[2] * C;
+            if (lx < 0 || lx >= C || ly < 0 || ly >= C || lz < 0 || lz >= C)
+                continue;                           // cannot happen (chunk_of); keeps the write provably in bounds
+            size_t const idx = owned_index(lx, ly, lz);
+            if (nw != it->second[idx])
+            {
+                it->second[idx] = nw;
+                if (touched.insert(k).second)
+                    order.push_back(k);
+            }
+        }
         return order;
     }
 
@@ -707,10 +729,39 @@ namespace Noggit::Everwood::Voxel
     void World::Window(Key const& k, int8_t* w)
     {
         int32_t const base[3] = { k[0] * C - 1, k[1] * C - 1, k[2] * C - 1 };
+        // The 27 owners resolved once (Sample() per voxel hashed on every one of the 39k reads); the values are
+        // the same: the active chunk's density, else the owner column's seed.
+        Density const* owner[27];
+        std::shared_ptr<ColumnSeed const> seeds[9];
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                {
+                    auto it = m_chunks.find(Key{ k[0] + dx, k[1] + dy, k[2] + dz });
+                    owner[(dx + 1) + 3 * (dy + 1) + 9 * (dz + 1)] = it == m_chunks.end() ? nullptr : &it->second;
+                }
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                seeds[(dx + 1) + 3 * (dy + 1)] = Seed(ColKey{ k[0] + dx, k[1] + dy });
         for (int32_t lz = 0; lz < SAMPLES; ++lz)
+        {
+            int32_t const z = base[2] + lz;
+            int32_t const oz = chunk_of(z) - k[2] + 1;
             for (int32_t ly = 0; ly < SAMPLES; ++ly)
+            {
+                int32_t const y = base[1] + ly;
+                int32_t const oy = chunk_of(y) - k[1] + 1;
                 for (int32_t lx = 0; lx < SAMPLES; ++lx)
-                    w[win_index(lx, ly, lz)] = Sample(base[0] + lx, base[1] + ly, base[2] + lz);
+                {
+                    int32_t const x = base[0] + lx;
+                    int32_t const ox = chunk_of(x) - k[0] + 1;
+                    Density const* d = owner[ox + 3 * oy + 9 * oz];
+                    w[win_index(lx, ly, lz)] = d
+                        ? (*d)[owned_index(x - chunk_of(x) * C, y - chunk_of(y) * C, z - chunk_of(z) * C)]
+                        : seeds[ox + 3 * oy]->Value(x, y, z);
+                }
+            }
+        }
     }
 
     // VoxelWorldData::window_seed_heights (a column's seed serves its own and the neighbours' apron)

@@ -30,6 +30,31 @@ namespace Noggit::Everwood::Voxel
     return uint8_t(a);
   }
 
+  uint8_t PaintHardAmount(float s, uint8_t core, float d, float r)
+  {
+    float const cc = PAINT3_CORES[core & 3];
+    float const u = d / r;
+    float w;
+    if (u <= cc)
+      w = 1.0f;
+    else
+    {
+      float const t = (u - cc) / (1.0f - cc);
+      float const v = 1.0f - t;
+      w = (v * v) * (3.0f - 2.0f * v);
+    }
+    float const sw = s * w;
+    float a = std::round(sw * 255.0f);
+    if (a < 0.0f) a = 0.0f;
+    if (a > 255.0f) a = 255.0f;
+    return uint8_t(a);
+  }
+
+  uint8_t Paint3Param::Amount(float s, float d, float r) const
+  {
+    return hard >= 0 ? PaintHardAmount(s, uint8_t(hard), d, r) : PaintFalloffAmount(s, falloff, d, r);
+  }
+
   uint8_t PaintInc(uint8_t a, uint8_t amt)
   {
     uint32_t const x = a, m = amt;
@@ -51,13 +76,17 @@ namespace Noggit::Everwood::Voxel
     o.falloff = f == 3 ? FALLOFF_SMOOTH : f;
     o.erase = (p & PAINT_ERASE) != 0;
     o.reveal = (p & PAINT3_REVEAL) != 0;
+    o.hard = (p & PAINT3_HARD) != 0 ? int((p >> PAINT_FALLOFF_SHIFT) & 0x3) : -1;
     return o;
   }
 
   uint16_t Paint3Param::ToParam() const
   {
-    return uint16_t((id & PAINT_ID_MASK) | (uint16_t(std::min<uint8_t>(falloff, 2)) << PAINT_FALLOFF_SHIFT)
-                    | (erase ? PAINT_ERASE : 0) | (reveal ? PAINT3_REVEAL : 0));
+    uint16_t const base = uint16_t((id & PAINT_ID_MASK) | (uint16_t(std::min<uint8_t>(falloff, 2)) << PAINT_FALLOFF_SHIFT)
+                                   | (erase ? PAINT_ERASE : 0) | (reveal ? PAINT3_REVEAL : 0));
+    if (hard < 0)
+      return base;
+    return uint16_t((base & ~(0x3 << PAINT_FALLOFF_SHIFT)) | PAINT3_HARD | (uint16_t(hard & 0x3) << PAINT_FALLOFF_SHIFT));
   }
 
   namespace
@@ -371,7 +400,7 @@ namespace Noggit::Everwood::Voxel
           }
           if (!painted)
             continue;
-          uint8_t const a = PaintFalloffAmount(s, pp.falloff, dist[c], r);
+          uint8_t const a = pp.Amount(s, dist[c], r);
           if (a == 0)
             continue;
           Key const ck{ chunk_of(p[0]), chunk_of(p[1]), chunk_of(p[2]) };

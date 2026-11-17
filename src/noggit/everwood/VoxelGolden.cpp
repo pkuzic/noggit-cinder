@@ -1,12 +1,15 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 //
-// Golden-vector check of the voxel field against the game client's output, voxel-core/golden-v3.10.txt (or
-// v3.9 / v3.6) (written by benilla-voxel tests/golden_v3.rs). Same synthetic height function, same edit list
+// Golden-vector check of the voxel field against the game client's output, voxel-core/golden-v3.11.txt (or
+// v3.10 / v3.9 / v3.6) (written by benilla-voxel tests/golden_v3.rs). Same synthetic height function, same edit list
 // (read back from the file by bit pattern), same activation; every chunk's density + mesh FNV, the down-ray
 // height hash, the density hash and the closure rule must match. CONTRACT v3.10 files also carry the mode-7
 // 3D paint lines (p3param, paint3_chunks, paint3, paint3_sample, paint3_hash): the canonical paint, the
 // closure rebuild (density AND paint), the incremental path and the out-of-order dirtying must reproduce
-// them. Runs in the standalone test exe and, through the smoke hook, inside noggit.exe on the very object
+// them. CONTRACT v3.11 files (smooth passes, 16 yd + HARD paint) add `hard` to p3param and per-seq `case` lines
+// (density + paint hash of the pipeline over edits 1..=seq); older files (<= v3.10) are replayed through the game's
+// v310_compat shim (golden_v3.rs): the pass bits of mode 2 and bit 15 of mode 7 are cleared and a mode-7 radius in
+// (8, 16] becomes 16.5, so every RESULT line keeps its frozen value. Runs in the standalone test exe and, through the smoke hook, inside noggit.exe on the very object
 // code the editor uses.
 #include <noggit/everwood/VoxelField.hpp>
 #include <noggit/everwood/VoxelPaint3.hpp>
@@ -80,6 +83,118 @@ namespace Noggit::Everwood::Voxel
     }
   }
 
+  namespace
+  {
+    // golden_v3.rs prefix(): the golden pipeline (activation + canonical build + canonical paint) over `edits`.
+    void pipeline(std::vector<Edit> const& edits, uint64_t& density, uint64_t& paint)
+    {
+      World w(goldenHeight);
+      for (Edit const& e : edits)
+        if (e.IsApplied())
+          for (Key const& k : e.TouchedChunks())
+            w.Activate(k, nullptr);
+      std::vector<Key> keys;
+      for (auto const& kv : w.ChunksRef())
+        keys.push_back(kv.first);
+      std::sort(keys.begin(), keys.end());
+      Journal j;
+      for (Edit const& e : edits)
+        j.Add(e);
+      std::vector<Edit const*> all;
+      for (Edit const& e : j.Edits())
+        all.push_back(&e);
+      w.RebuildPaint(keys, j.Paint3Keys(), all);
+      density = ChunksHash(w.ChunksRef());
+      paint = Paint3Hash(w.PaintRef());
+    }
+
+    // v3.11 partial rebuild: an earlier dig A in chunk X+1 next to the border, an 8-pass smooth B whose brush ends
+    // 2 voxels from the border (inside the 8-voxel grown gather), a soft 4-pass smooth, a later build C. Rebuilding
+    // only B's read closure (alone, or as the undo / redo of C) must give the full replay's bytes.
+    bool partialRebuildCheck(std::ostringstream& out)
+    {
+      auto mk = [](uint32_t seq, float x, float y, float z, float r, uint8_t mode, uint8_t str, uint16_t param)
+      {
+        Edit e;
+        e.seq = seq;
+        e.pos[0] = x; e.pos[1] = y; e.pos[2] = z;
+        e.radius = r; e.mode = mode; e.strength = str; e.param = param;
+        return e;
+      };
+      // Chunk border at lattice -17856 = x -8928 yd (chunks -559 | -558). z 80 yd = lattice 160 (chunk 5).
+      std::vector<Edit> const base = {
+        mk(1, -8927.0f, -70.0f, 80.0f, 3.0f, MODE_DIG, 255, 0),
+        mk(2, -8932.0f, -70.0f, 80.0f, 3.0f, MODE_SMOOTH, 255, uint16_t(3 << SMOOTH_PASSES_SHIFT)),
+        mk(3, -8931.0f, -69.0f, 80.5f, 4.0f, MODE_SMOOTH, 200, uint16_t(SOFT_FLAG | (2 << SMOOTH_PASSES_SHIFT))),
+        mk(4, -8922.0f, -70.0f, 80.0f, 3.0f, MODE_BUILD, 255, 0),
+      };
+      bool ok = true;
+      uint64_t fullD = 0, fullP = 0;
+      pipeline(base, fullD, fullP);
+
+      World w(goldenHeight);
+      for (Edit const& e : base)
+        for (Key const& k : e.TouchedChunks())
+          w.Activate(k, nullptr);
+      std::vector<Key> keys;
+      for (auto const& kv : w.ChunksRef())
+        keys.push_back(kv.first);
+      Journal j;
+      for (Edit const& e : base)
+        j.Add(e);
+      std::vector<Edit const*> all;
+      for (Edit const& e : j.Edits())
+        all.push_back(&e);
+      w.Rebuild(keys, all);
+      uint64_t const fullHash = ChunksHash(w.ChunksRef());
+      if (fullHash != fullD)
+        ok = false;
+
+      size_t bad = 0, rebuilds = 0;
+      // (1) the read closure of every chunk B touches, rebuilt alone, on top of the finished world.
+      for (Key const& t : base[1].TouchedChunks())
+      {
+        std::set<Key> const clo = j.ReadClosure({ t });
+        std::vector<Key> set, cv(clo.begin(), clo.end());
+        for (Key const& k : clo)
+          if (w.IsActive(k))
+            set.push_back(k);
+        w.Rebuild(set, j.EditsFor(cv));
+        ++rebuilds;
+        if (ChunksHash(w.ChunksRef()) != fullHash)
+          ++bad;
+      }
+      // (2) undo C (rebuild its closure without it), then redo it.
+      {
+        size_t const cPos = base.size() - 1;
+        Journal j2;
+        for (Edit const& e : base)
+          j2.Add(e);
+        j2.Remove(cPos);
+        std::vector<Key> const ct = base[cPos].TouchedChunks();
+        for (int pass = 0; pass < 2; ++pass)
+        {
+          std::set<Key> const clo = j2.ReadClosure(ct);
+          std::vector<Key> set, cv(clo.begin(), clo.end());
+          for (Key const& k : clo)
+            if (w.IsActive(k))
+              set.push_back(k);
+          w.Rebuild(set, j2.EditsFor(cv));
+          ++rebuilds;
+          if (pass == 0)
+            j2.Insert(cPos, base[cPos]);        // redo
+          else if (ChunksHash(w.ChunksRef()) != fullHash)
+            ++bad;
+        }
+      }
+      if (bad)
+        ok = false;
+      out << "v3.11 partial rebuild (8-pass smooth next to a chunk with an earlier edit): " << rebuilds
+          << " closure rebuilds, differing " << bad << " (full " << hex16(fullHash) << ")\n";
+      return ok;
+    }
+  }
+
   bool RunGolden(char const* path, std::string& report)
   {
     std::ifstream in(path);
@@ -92,13 +207,21 @@ namespace Noggit::Everwood::Voxel
     std::vector<Edit> edits;
     std::vector<std::string> expected;       // every chunk / height / heights / density_hash line
     std::vector<std::string> expectedP3;     // CONTRACT v3.10: every p3param / paint3* line
+    std::vector<std::string> expectedCases;  // CONTRACT v3.11: every `case <seq> density_hash .. paint3_hash ..` line
+    bool v311 = false;                       // header names v3.11: the edit list is read with v3.11 meanings
     std::string closureLine, activeLine;
     std::string line;
     while (std::getline(in, line))
     {
       if (!line.empty() && line.back() == '\r')
         line.pop_back();
-      if (line.rfind("edit ", 0) == 0)
+      if (line.rfind("# MONKEY voxel golden v3.11", 0) == 0)
+        v311 = true;
+      if (line.rfind("case ", 0) == 0)
+      {
+        expectedCases.push_back(line);
+      }
+      else if (line.rfind("edit ", 0) == 0)
       {
         unsigned seq, mode, strength;
         unsigned x, y, z, r;
@@ -136,6 +259,21 @@ namespace Noggit::Everwood::Voxel
         activeLine = line;
       }
     }
+
+    // v3.10 and older files: the game's v310_compat shim (echoEdits = the inputs as written, for the p3param echo).
+    std::vector<Edit> const echoEdits = edits;
+    if (!v311)
+      for (Edit& e : edits)
+      {
+        if (e.mode == MODE_SMOOTH)
+          e.param = uint16_t(e.param & ~SMOOTH_PASSES_MASK);
+        if (e.mode == MODE_PAINT3)
+        {
+          e.param = uint16_t(e.param & ~PAINT3_HARD);
+          if (e.radius > 8.0f && e.radius <= 16.0f)
+            e.radius = 16.5f;
+        }
+      }
 
     // golden_v3.rs activate: the client's want + expand_column over every applied edit.
     World w(goldenHeight);
@@ -254,15 +392,19 @@ namespace Noggit::Everwood::Voxel
 
     // CONTRACT v3.10 paint3 lines (golden_v3.rs v310_paint3_vectors_replay_exactly_and_are_written).
     std::vector<std::string> gotP3;
-    for (Edit const& e : edits)
+    for (size_t i = 0; i < edits.size(); ++i)
     {
+      Edit const& e = v311 ? edits[i] : echoEdits[i];          // old files echo the inputs as written
       if (!IsPaint3(e))
         continue;
       Paint3Param const pp = Paint3Param::FromParam(e.param);
-      char b[160];
+      char b[192];
       std::snprintf(b, sizeof(b), "p3param %u %04x id %u falloff %u erase %u reveal %u valid %u", unsigned(e.seq), unsigned(e.param),
-                    unsigned(pp.id), unsigned(pp.falloff), unsigned(pp.erase), unsigned(pp.reveal), unsigned(e.IsValid()));
-      gotP3.push_back(b);
+                    unsigned(pp.id), unsigned(pp.falloff), unsigned(pp.erase), unsigned(pp.reveal), unsigned(edits[i].IsValid()));
+      std::string l = b;
+      if (v311)
+        l += " hard " + std::to_string(pp.hard);
+      gotP3.push_back(l);
     }
     {
       std::vector<Key> pk;
@@ -427,6 +569,35 @@ namespace Noggit::Everwood::Voxel
       oooText = o.str();
     }
 
+    // CONTRACT v3.11 case lines + the partial rebuild next to a chunk with an earlier edit.
+    size_t caseDiff = 0;
+    for (std::string const& exp : expectedCases)
+    {
+      unsigned seq = 0;
+      if (std::sscanf(exp.c_str(), "case %u ", &seq) != 1 || seq == 0 || seq > edits.size())
+      {
+        out << "DIFF bad case line '" << exp << "'\n";
+        ++caseDiff;
+        continue;
+      }
+      std::vector<Edit> pre(edits.begin(), edits.begin() + seq);
+      uint64_t d = 0, p = 0;
+      pipeline(pre, d, p);
+      std::string const gotCase = "case " + std::to_string(seq) + " density_hash " + hex16(d) + " paint3_hash " + hex16(p);
+      if (gotCase != exp)
+      {
+        if (caseDiff < 8)
+          out << "DIFF expected '" << exp << "' got '" << gotCase << "'\n";
+        ++caseDiff;
+      }
+    }
+    bool partialOk = true;
+    if (v311)
+      partialOk = partialRebuildCheck(out);
+    if (!expectedCases.empty())
+      out << "case lines compared " << expectedCases.size() << ", differing " << caseDiff << "\n";
+    out << (v311 ? "edit list read with v3.11 meanings\n" : "edit list replayed through the v3.10 compat shim\n");
+
     out << "golden lines compared " << count << ", differences " << diffs << "\n";
     out << "density_hash " << hex16(fullHash) << "\n";
     char avgText[32];
@@ -444,6 +615,6 @@ namespace Noggit::Everwood::Voxel
       out << oooText;
     }
     report = out.str();
-    return diffs == 0 && closureBad == 0 && incOk && p3Diff == 0 && closurePaintBad == 0 && oooOk;
+    return diffs == 0 && closureBad == 0 && incOk && p3Diff == 0 && closurePaintBad == 0 && oooOk && caseDiff == 0 && partialOk;
   }
 }

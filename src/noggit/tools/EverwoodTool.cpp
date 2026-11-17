@@ -8,6 +8,7 @@
 #include <noggit/MapChunk.h>
 #include <noggit/MapTile.h>
 #include <noggit/MapView.h>
+#include <noggit/TabletManager.hpp>
 #include <noggit/TileWater.hpp>
 #include <noggit/World.h>
 #include <noggit/World.inl>
@@ -51,6 +52,8 @@ namespace Noggit
     constexpr float BRIDGE_MAX_LENGTH = 160.f;
     constexpr int BRIDGE_MAX_EDITS = 400;
     constexpr float AIM_RANGE = 800.f;
+    constexpr float RAMP_MAX_LENGTH = 300.f;
+    constexpr int RAMP_MAX_EDITS = 700;
 
     // sculpt.rs strength_u8: percent (1-100) to the wire strength /255.
     uint8_t strengthU8(float pct)
@@ -194,10 +197,16 @@ namespace Noggit
     _pending.reset();
   }
 
-  void EverwoodStrokeBuilder::end(uint64_t nowMs, std::optional<Sample> sample, std::vector<Sample>& out)
+  void EverwoodStrokeBuilder::end(uint64_t nowMs, std::optional<Sample> sample, std::vector<Sample>& out, bool cursorMoved, bool softenOnly)
   {
     if (!_active)
       return;
+    if (!cursorMoved)
+    {
+      sample.reset();
+      if (_pending && !(softenOnly && _pending->mode == MODE_SMOOTH))
+        _pending.reset();
+    }
     if (sample)
       _pending = capped(*sample);
     tick(nowMs, out);
@@ -276,6 +285,8 @@ namespace Noggit
   {
     if (_kind == Kind::Flow)
       return _flowRadius;
+    if (_kind == Kind::Ramp)
+      return std::clamp(_rampWidth * 0.5f, 0.5f, 16.f);
     return _kind == Kind::Bridge ? _bridgeRadius : (_kind == Kind::Paint ? _paintRadius : _radius);
   }
 
@@ -316,13 +327,21 @@ namespace Noggit
       return box;
     };
 
-    _kindBox = combo({ "Sculpt", "Flatten", "Bridge / Tunnel", "Paint (caves)", "Water flow" });
+    _kindBox = combo({ "Sculpt", "Flatten", "Bridge / Tunnel", "Paint (caves)", "Water flow", "Ramp / Path" });
     _modeBox = combo({ "Lower / Dig", "Raise / Build", "Smooth", "Push out", "Pull in" });
     _radiusBox = spin(0.5, 16.0, 0.5, _radius);
     _strengthBox = spin(1.0, 100.0, 1.0, _strength, 0);
     _shapeBox = combo({ "Sphere", "Cube", "Upright cylinder" });
     _hardBox = new QCheckBox("Hard brush (CSG)", _panel);
     _falloffBox = combo({ "Smooth", "Linear", "Flat" });
+    _passesBox = combo({ "1", "2", "4", "8" });
+    _passesBox->setCurrentIndex(_smoothPasses);
+    _passesBox->setToolTip("How many smoothing passes one dab runs (CONTRACT v3.11). More passes smooth a steep slope "
+                           "in a single stroke; the game replays the same bytes.");
+    _pressureBox = new QCheckBox("Use tablet pressure", _panel);
+    _pressureBox->setChecked(_usePressure);
+    _pressureBox->setToolTip("With a pen tablet, the pen pressure scales the sculpt strength and the paint opacity. "
+                             "No effect without a tablet.");
     _hardnessBox = spin(0.0, 100.0, 5.0, _hardness, 0);
     _offsetBox = spin(-16.0, 16.0, 0.25, _offset, 2);
     _pushEdgeBox = combo({ "Hard edge", "Smooth", "Linear" });
@@ -331,12 +350,35 @@ namespace Noggit
     _archBox = spin(-32.0, 32.0, 0.5, _arch);
     _thicknessBox = spin(0.5, 32.0, 0.25, _thickness, 2);
 
+    // Ramp / Path
+    _rampWidthBox = spin(1.0, 32.0, 0.5, _rampWidth);
+    _rampWidthBox->setToolTip("Flat width of the path in yards. The edge softness adds a bank on each side.");
+    _rampSlopeBox = combo({ "Follow the clicked heights", "Fixed angle" });
+    _rampSlopeBox->setToolTip("Follow the clicked heights: the path rises or falls in a straight line between the points you click.\n"
+                              "Fixed angle: it leaves the first point at the angle below, whatever the other points' heights.");
+    _rampAngleBox = spin(-60.0, 60.0, 1.0, _rampAngle, 1);
+    _rampAngleBox->setToolTip("Fixed angle in degrees from the first point: positive rises along the path, negative falls.");
+    _rampEdgeBox = combo({ "Sharp", "Normal", "Soft" });
+    _rampEdgeBox->setCurrentIndex(_rampEdge);
+    _rampEdgeBox->setToolTip("Edge softness: how the path banks into the surrounding ground. Sharp = a short steep bank (60 deg, about 1 yd), "
+                             "Normal = 45 deg, about 2 yd, Soft = a gentle wide bank (30 deg, about 4 yd).");
+    _rampSmoothBox = new QCheckBox("Smooth edges", _panel);
+    _rampSmoothBox->setChecked(_rampSmooth);
+    _rampSmoothBox->setToolTip("After levelling, one light smooth pass along the strip rounds the edges and evens out the surface. "
+                               "Same stroke, same undo step.");
+    _smoothFloatersBox = new QCheckBox("Also remove floaters under the brush", _panel);
+    _smoothFloatersBox->setChecked(_smoothFloaters);
+    _smoothFloatersBox->setToolTip("When a Smooth stroke ends, tiny islands of ground floating in the air under the brush are dug away "
+                                   "(ordinary dig edits, same undo step as the stroke). Nothing but the floaters is touched.");
+
     _form->addRow("Tool", _kindBox);
     _form->addRow("Mode", _modeBox);
     _form->addRow("Bridge", _bridgeKindBox);
     _form->addRow("Radius (yd)", _radiusBox);
     _form->addRow("Shape", _shapeBox);
     _form->addRow("Strength (%)", _strengthBox);
+    _form->addRow("Passes", _passesBox);
+    _form->addRow("", _pressureBox);
     _form->addRow("", _hardBox);
     _form->addRow("Falloff", _falloffBox);
     _form->addRow("Hardness (%)", _hardnessBox);
@@ -345,6 +387,12 @@ namespace Noggit
     _form->addRow("Direction", _pushDirBox);
     _form->addRow("Arch (yd)", _archBox);
     _form->addRow("Deck thickness (yd)", _thicknessBox);
+    _form->addRow("Width (yd)", _rampWidthBox);
+    _form->addRow("Slope", _rampSlopeBox);
+    _form->addRow("Angle (deg)", _rampAngleBox);
+    _form->addRow("Edge softness", _rampEdgeBox);
+    _form->addRow("", _rampSmoothBox);
+    _form->addRow("", _smoothFloatersBox);
 
     // CONTRACT v3.10 Paint (caves): only the shared palette's textures (PaintPalette.hpp, the wire ids).
     _paintBox = new QWidget(_panel);
@@ -364,13 +412,27 @@ namespace Noggit
     _paintPickButton->setToolTip("Takes the texture selected in the Texture Paint tool, if it is in the shared palette.");
     _opacityBox = spin(1.0, 100.0, 1.0, _paintOpacity, 0);
     _paintFalloffBox = combo({ "Smooth", "Linear", "Flat" });
+    _paintHardBox = combo({ "Off (use falloff)", "Core 25 %", "Core 50 %", "Core 75 %", "Core 90 %" });
+    _paintHardBox->setToolTip("Hard brush (CONTRACT v3.11): full opacity inside the core, a smooth falloff from the "
+                              "core to the edge. When on, the Falloff choice is ignored.");
+    _sprayBox = new QCheckBox("Spray", _paintBox);
+    _sprayBox->setToolTip("Spray can: every dab becomes several small dabs (the brush Radius) scattered at random inside "
+                          "the spray size. Noggit only: each one is an ordinary cave-paint dab.");
+    _spraySizeBox = spin(0.5, 16.0, 0.5, _spraySize);
+    _spraySizeBox->setToolTip("Radius (yd) of the disc the small dabs are scattered in.");
+    _sprayDensityBox = spin(1.0, 32.0, 1.0, _sprayDensity, 0);
+    _sprayDensityBox->setToolTip("Small dabs per spray tick.");
     _eraseBox = new QCheckBox("Erase this texture", _paintBox);
     _revealBox = new QCheckBox("Reveal (fade every cave texture)", _paintBox);
     paintForm->addRow(_paintPreview);
     paintForm->addRow("Texture", _paintTextureBox);
     paintForm->addRow(_paintPickButton);
     paintForm->addRow("Opacity (%)", _opacityBox);
+    paintForm->addRow("Hardness", _paintHardBox);
     paintForm->addRow("Falloff", _paintFalloffBox);
+    paintForm->addRow("", _sprayBox);
+    paintForm->addRow("Spray size (yd)", _spraySizeBox);
+    paintForm->addRow("Spray density (dabs)", _sprayDensityBox);
     paintForm->addRow("", _eraseBox);
     paintForm->addRow("", _revealBox);
     auto* paintHelp = new QLabel("Paints dug or built voxel faces (cave floors, walls, ceilings) through the air the brush "
@@ -410,6 +472,26 @@ namespace Noggit
     bridgeRow->addWidget(_confirmButton);
     bridgeRow->addWidget(_cancelButton);
     outer->addLayout(bridgeRow);
+
+    // Remove floaters: tiny islands of ground that hang in the air (VoxelFloaters.hpp).
+    _floaterBox = new QWidget(_panel);
+    auto* floaterColumn = new QVBoxLayout(_floaterBox);
+    floaterColumn->setContentsMargins(0, 0, 0, 0);
+    auto* floaterForm = new QFormLayout();
+    floaterForm->setContentsMargins(0, 0, 0, 0);
+    floaterColumn->addLayout(floaterForm);
+    _floaterMaxBox = spin(1.0, 4096.0, 8.0, _floaterMax, 0);
+    _floaterMaxBox->setToolTip("A floating island of at most this many voxels (0.5 yd each) counts as a floater; 64 = about 8 cubic yards.");
+    floaterForm->addRow("Max floater size (voxels)", _floaterMaxBox);
+    auto* floaterButton = new QPushButton("Remove floaters", _floaterBox);
+    floaterButton->setToolTip("Finds every small piece of ground that is not connected to the ground (anywhere in the edited area) and "
+                              "digs it away with ordinary dig edits. Ground, overhangs, arches and bridges are never touched. One undo step.");
+    floaterColumn->addWidget(floaterButton);
+    _floaterLabel = new QLabel(_floaterBox);
+    _floaterLabel->setWordWrap(true);
+    _floaterLabel->setVisible(false);
+    floaterColumn->addWidget(_floaterLabel);
+    outer->addWidget(_floaterBox);
 
     // The voxel journal's buttons; hidden for Water flow (its strokes are ordinary Noggit actions: Ctrl+Z).
     _voxelButtons = new QWidget(_panel);
@@ -466,7 +548,9 @@ namespace Noggit
     {
       if (_updating)
         return;
-      if (_kind == Kind::Flatten)
+      if (_kind == Kind::Ramp)
+        _rampStrength = float(v);
+      else if (_kind == Kind::Flatten)
         _flattenStrength = float(v);
       else if (_mode == SculptMode::Push || _mode == SculptMode::Pull)
         _pushStrength = float(v);
@@ -490,6 +574,19 @@ namespace Noggit
     QObject::connect(_pushDirBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _pushAlongView = i == 1; });
     QObject::connect(_archBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _arch = float(v); });
     QObject::connect(_thicknessBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _thickness = float(v); });
+
+    QObject::connect(_rampWidthBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _rampWidth = float(v); });
+    QObject::connect(_rampSlopeBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this, changed](int i)
+    {
+      _rampSlope = i;
+      changed();
+    });
+    QObject::connect(_rampAngleBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _rampAngle = float(v); });
+    QObject::connect(_rampEdgeBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _rampEdge = std::clamp(i, 0, 2); });
+    QObject::connect(_rampSmoothBox, &QCheckBox::toggled, _panel, [this](bool on) { _rampSmooth = on; });
+    QObject::connect(_smoothFloatersBox, &QCheckBox::toggled, _panel, [this](bool on) { _smoothFloaters = on; });
+    QObject::connect(_floaterMaxBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _floaterMax = std::clamp(int(std::lround(v)), 1, 4096); });
+    QObject::connect(floaterButton, &QPushButton::clicked, _panel, [this] { removeFloaters(); });
 
     QObject::connect(_flowModeBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _flowErase = i == 1; });
     QObject::connect(_flowRadiusBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _flowRadius = float(v); });
@@ -520,6 +617,20 @@ namespace Noggit
     });
     QObject::connect(_opacityBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _paintOpacity = float(v); });
     QObject::connect(_paintFalloffBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _paintFalloff = uint8_t(i); });
+    QObject::connect(_passesBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this](int i) { _smoothPasses = std::clamp(i, 0, 3); });
+    QObject::connect(_pressureBox, &QCheckBox::toggled, _panel, [this](bool on) { _usePressure = on; });
+    QObject::connect(_paintHardBox, QOverload<int>::of(&QComboBox::currentIndexChanged), _panel, [this, changed](int i)
+    {
+      _paintHard = i - 1;
+      changed();
+    });
+    QObject::connect(_sprayBox, &QCheckBox::toggled, _panel, [this, changed](bool on)
+    {
+      _spray = on;
+      changed();
+    });
+    QObject::connect(_spraySizeBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _spraySize = float(v); });
+    QObject::connect(_sprayDensityBox, QOverload<double>::of(&QDoubleSpinBox::valueChanged), _panel, [this](double v) { _sprayDensity = std::clamp(int(std::lround(v)), 1, 32); });
     QObject::connect(_eraseBox, &QCheckBox::toggled, _panel, [this](bool on) { _paintErase = on; });
     QObject::connect(_revealBox, &QCheckBox::toggled, _panel, [this, changed](bool on)
     {
@@ -527,8 +638,20 @@ namespace Noggit
       changed();
     });
 
-    QObject::connect(_confirmButton, &QPushButton::clicked, _panel, [this] { confirmBridge(); });
-    QObject::connect(_cancelButton, &QPushButton::clicked, _panel, [this] { cancelBridge(); });
+    QObject::connect(_confirmButton, &QPushButton::clicked, _panel, [this]
+    {
+      if (_kind == Kind::Ramp)
+        confirmRamp();
+      else
+        confirmBridge();
+    });
+    QObject::connect(_cancelButton, &QPushButton::clicked, _panel, [this]
+    {
+      if (_kind == Kind::Ramp)
+        cancelRamp();
+      else
+        cancelBridge();
+    });
     QObject::connect(undoButton, &QPushButton::clicked, _panel, [this] { undo(); });
     QObject::connect(redoButton, &QPushButton::clicked, _panel, [this] { redo(); });
     QObject::connect(exportButton, &QPushButton::clicked, _panel, [this]
@@ -567,6 +690,7 @@ namespace Noggit
     bool const softOptions = sculpt && !pushPull && !_hard;
     bool const paint = _kind == Kind::Paint;
     bool const flow = _kind == Kind::Flow;
+    bool const ramp = _kind == Kind::Ramp;
 
     auto show = [this](QWidget* field, bool visible)
     {
@@ -577,31 +701,46 @@ namespace Noggit
     show(_modeBox, sculpt);
     show(_bridgeKindBox, bridge);
     show(_strengthBox, !bridge && !paint && !flow);
-    show(_radiusBox, !flow);
+    show(_radiusBox, !flow && !ramp);
+    show(_rampWidthBox, ramp);
+    show(_rampSlopeBox, ramp);
+    show(_rampAngleBox, ramp && _rampSlope == 1);
+    show(_rampEdgeBox, ramp);
+    show(_rampSmoothBox, ramp);
+    show(_smoothFloatersBox, sculpt && _mode == SculptMode::Smooth);
+    _floaterBox->setVisible(!flow);
+    _floaterLabel->setText(_floaterText);
+    _floaterLabel->setVisible(!_floaterText.isEmpty());
     show(_shapeBox, shapeMatters);
     show(_hardBox, sculpt && !pushPull);
     show(_falloffBox, softOptions);
+    show(_passesBox, sculpt && _mode == SculptMode::Smooth);
+    show(_pressureBox, !bridge && !flow && !ramp);
     show(_hardnessBox, softOptions);
     show(_offsetBox, flatten);
     show(_pushEdgeBox, pushPull);
     show(_pushDirBox, pushPull);
     show(_archBox, bridge);
     show(_thicknessBox, bridge && !_tunnel);
-    _bridgeLabel->setVisible(bridge);
-    _confirmButton->setVisible(bridge);
-    _cancelButton->setVisible(bridge);
+    _bridgeLabel->setVisible(bridge || ramp);
+    _confirmButton->setVisible(bridge || ramp);
+    _cancelButton->setVisible(bridge || ramp);
+    _confirmButton->setText(ramp ? "Build ramp" : "Build");
     _paintBox->setVisible(paint);
     _flowBox->setVisible(flow);
     _voxelButtons->setVisible(!flow);
     _eraseBox->setEnabled(!_paintReveal);
+    _paintFalloffBox->setEnabled(_paintHard < 0);                 // a hard core replaces the falloff
+    _spraySizeBox->setEnabled(_spray);
+    _sprayDensityBox->setEnabled(_spray);
     if (!paint)
       setHint({});
 
-    // Mode 7 is valid up to 8 yd (CONTRACT v3.10).
+    // Mode 7 is valid up to 16 yd (CONTRACT v3.11; 8 yd in v3.10).
     _radiusBox->setRange(paint ? PAINT_RADIUS_MIN : 0.5, paint ? PAINT3_MAX_RADIUS : 16.0);
     _radiusBox->setValue(bridge ? _bridgeRadius : (paint ? _paintRadius : _radius));
     _shapeBox->setCurrentIndex(bridge ? _bridgeShape : _shape);
-    _strengthBox->setValue(flatten ? _flattenStrength : (pushPull ? _pushStrength : _strength));
+    _strengthBox->setValue(ramp ? _rampStrength : (flatten ? _flattenStrength : (pushPull ? _pushStrength : _strength)));
 
     if (bridge)
     {
@@ -614,6 +753,21 @@ namespace Noggit
         BridgeSpec const spec = bridgeSpec();
         _bridgeLabel->setText(QString("Length %1 yd, about %2 edits. Click again or press Build.")
                               .arg(double(glm::distance(spec.a, spec.b)), 0, 'f', 1).arg(spec.points()));
+      }
+    }
+    if (ramp)
+    {
+      if (_rampPoints.empty())
+        _bridgeLabel->setText("Click the ground to place the first point of the path.");
+      else if (_rampPoints.size() == 1)
+        _bridgeLabel->setText("Click the next point of the path.");
+      else
+      {
+        float len = 0.f;
+        for (size_t i = 1; i < _rampPoints.size(); ++i)
+          len += glm::distance(glm::vec2(_rampPoints[i]), glm::vec2(_rampPoints[i - 1]));
+        _bridgeLabel->setText(QString("%1 points, %2 yd long. Click more points, then click the last point again or press Build ramp.")
+                              .arg(_rampPoints.size()).arg(double(len), 0, 'f', 1));
       }
     }
     _updating = false;
@@ -686,7 +840,14 @@ namespace Noggit
       return true;
     };
     bool const on = value == "1" || value == "on" || value == "true";
-    if (key == "tool") return pick(_kindBox, { "sculpt", "flatten", "bridge", "paint", "flow" });
+    if (key == "tool") return pick(_kindBox, { "sculpt", "flatten", "bridge", "paint", "flow", "ramp" });
+    if (key == "floaters") { _smoothFloatersBox->setChecked(on); return true; }
+    if (key == "floater_max") { _floaterMaxBox->setValue(value.toDouble()); return true; }
+    if (key == "ramp_width") { _rampWidthBox->setValue(value.toDouble()); return true; }
+    if (key == "ramp_slope") return pick(_rampSlopeBox, { "follow", "angle" });
+    if (key == "ramp_angle") { _rampAngleBox->setValue(value.toDouble()); return true; }
+    if (key == "ramp_edge") return pick(_rampEdgeBox, { "sharp", "normal", "soft" });
+    if (key == "ramp_smooth") { _rampSmoothBox->setChecked(on); return true; }
     if (key == "flow_mode") return pick(_flowModeBox, { "paint", "erase" });
     if (key == "flow_radius") { _flowRadiusBox->setValue(value.toDouble()); return true; }
     if (key == "flow_velocity") { _flowVelocityBox->setValue(value.toDouble()); return true; }
@@ -694,6 +855,27 @@ namespace Noggit
     if (key == "texture") return selectPaintText(value);
     if (key == "opacity") { _opacityBox->setValue(value.toDouble()); return true; }
     if (key == "paint_falloff") return pick(_paintFalloffBox, { "smooth", "linear", "flat" });
+    if (key == "passes")
+    {
+      int const i = QStringList({ "1", "2", "4", "8" }).indexOf(value);
+      if (i < 0)
+        return false;
+      _passesBox->setCurrentIndex(i);
+      return true;
+    }
+    if (key == "paint_hard")
+    {
+      int const i = QStringList({ "off", "25", "50", "75", "90" }).indexOf(value);
+      if (i < 0)
+        return false;
+      _paintHardBox->setCurrentIndex(i);
+      return true;
+    }
+    if (key == "spray") { _sprayBox->setChecked(on); return true; }
+    if (key == "spray_size") { _spraySizeBox->setValue(value.toDouble()); return true; }
+    if (key == "spray_density") { _sprayDensityBox->setValue(value.toDouble()); return true; }
+    if (key == "pressure") { _pressureBox->setChecked(on); return true; }
+    if (key == "fake_pressure") { _fakePressure = std::clamp(value.toFloat(), 0.f, 1.f); return true; }   // smoke: pretend a tablet
     if (key == "erase") { _eraseBox->setChecked(on); return true; }
     if (key == "reveal") { _revealBox->setChecked(on); return true; }
     if (key == "mode") return pick(_modeBox, { "dig", "build", "smooth", "push", "pull" });
@@ -751,6 +933,7 @@ namespace Noggit
     glm::vec3 const origin = noggitToWow(ray.origin());
     glm::vec3 const end = noggitToWow(ray.position(1.f));
     _viewDirWow = glm::normalize(end - origin);
+    _cursorRay = { origin, _viewDirWow };
     _aim = _layer->raycast(origin, _viewDirWow, AIM_RANGE);
   }
 
@@ -776,7 +959,7 @@ namespace Noggit
     }
 
     e.mode = uint8_t(_mode);
-    uint8_t const s = strengthU8(_strength);
+    uint8_t const s = strengthU8(std::clamp(_strength * pressureScale(), 1.f, 100.f));
     if (_hard)
     {
       e.strength = _mode == SculptMode::Smooth ? std::min<uint8_t>(s, 128) : 255;
@@ -789,6 +972,8 @@ namespace Noggit
     }
     if (_mode == SculptMode::Dig || _mode == SculptMode::Build)
       e.param = WithShape(e.param, _shape);
+    else if (_mode == SculptMode::Smooth)
+      e.param = WithSmoothPasses(e.param, uint8_t(_smoothPasses));      // CONTRACT v3.11: bits 9-10
     return e;
   }
 
@@ -837,15 +1022,68 @@ namespace Noggit
     setPos(e, hit.pos + hit.normal * 0.5f);
     e.radius = std::clamp(_paintRadius, PAINT_RADIUS_MIN, PAINT3_MAX_RADIUS);
     e.mode = MODE_PAINT3;
-    e.strength = strengthU8(_paintOpacity);
+    e.strength = strengthU8(std::clamp(_paintOpacity * pressureScale(), 1.f, 100.f));
     Paint3Param p;
     // REVEAL ignores the id: it works with no texture selected.
     p.id = uint16_t(std::max(_paintTexture, 0));
     p.falloff = _paintFalloff;
     p.erase = _paintErase && !_paintReveal;
     p.reveal = _paintReveal;
+    p.hard = _paintHard;           // v3.11: -1 = the falloff above, 0..3 = the hardness core
     e.param = p.ToParam();
     return e;
+  }
+
+  float EverwoodTool::pressureScale() const
+  {
+    if (!_usePressure)
+      return 1.f;
+    if (_fakePressure > 0.f)
+      return _fakePressure;
+    auto* tablet = Noggit::TabletManager::instance();
+    if (!tablet->isActive())
+      return 1.f;
+    // A pen hovering reports 0: keep a floor so a light touch still leaves a mark.
+    return std::clamp(float(tablet->pressure()), 0.05f, 1.f);
+  }
+
+  // Paint (caves) spray: the dab's centre sits 0.5 yd off the surface along its normal; the small dabs are scattered
+  // uniformly (sqrt radial law) in a disc of _spraySize on the plane through that centre, then snapped to the surface. A xorshift32 seeded per
+  // stroke, so a stroke replays the same. Every emitted dab is an ordinary valid mode-7 edit.
+  void EverwoodTool::sprayDabs(Edit const& dab, std::vector<Edit>& out)
+  {
+    auto next = [this]
+    {
+      uint32_t x = _sprayState;
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      _sprayState = x ? x : 0x9E3779B9u;
+      return float(_sprayState >> 8) / 16777216.f;     // [0, 1)
+    };
+    glm::vec3 n = _aim ? _aim->normal : glm::vec3(0.f, 0.f, 1.f);
+    if (!(glm::length(n) > 1e-4f))
+      n = glm::vec3(0.f, 0.f, 1.f);
+    n = glm::normalize(n);
+    glm::vec3 const helper = std::fabs(n.z) < 0.9f ? glm::vec3(0.f, 0.f, 1.f) : glm::vec3(1.f, 0.f, 0.f);
+    glm::vec3 const u = glm::normalize(glm::cross(n, helper));
+    glm::vec3 const v = glm::cross(n, u);
+    glm::vec3 const centre = getPos(dab);
+    for (int i = 0; i < _sprayDensity; ++i)
+    {
+      float const rho = _spraySize * std::sqrt(next());
+      float const th = 6.2831853f * next();
+      // The point on the aimed plane, snapped to the surface below it (a dab hangs 0.5 yd above the voxel face it
+      // paints; on a curved cave floor the plane itself would float out of reach). A scatter point with no
+      // painted-edit surface within reach is dropped: it would be an empty dab.
+      glm::vec3 const p = centre + (u * std::cos(th) + v * std::sin(th)) * rho;
+      auto const hit = _layer->raycast(p + n * 3.f, -n, 8.f);
+      if (!hit || _layer->editedWeightAt(*hit) < PAINT_EDITED_MIN)
+        continue;
+      Edit e = dab;
+      setPos(e, hit->pos + hit->normal * 0.5f);
+      out.push_back(e);
+    }
   }
 
   // paint3.rs would_refuse3: the whole dab is refused when a block it touches already has 4 other textures.
@@ -897,8 +1135,21 @@ namespace Noggit
     });
   }
 
-  void EverwoodTool::commit(std::vector<Edit> const& edits)
+  void EverwoodTool::commit(std::vector<Edit> const& editsIn)
   {
+    std::vector<Edit> sprayed;
+    bool const spraying = _spray && _kind == Kind::Paint;
+    if (spraying)
+    {
+      for (Edit const& e : editsIn)
+      {
+        if (e.mode == MODE_PAINT3 && _strokeHeld)
+          sprayDabs(e, sprayed);
+        else
+          sprayed.push_back(e);
+      }
+    }
+    std::vector<Edit> const& edits = spraying ? sprayed : editsIn;
     for (Edit const& e : edits)
     {
       if (e.mode == MODE_PAINT3 && _strokeHeld)
@@ -918,6 +1169,8 @@ namespace Noggit
         setHint({});
       }
       _layer->addEdit(e, _strokeId);
+      if (_strokeHeld && e.mode == MODE_SMOOTH && _kind == Kind::Sculpt && _mode == SculptMode::Smooth)
+        extendFloaterBox(e);
     }
   }
 
@@ -925,9 +1178,15 @@ namespace Noggit
   {
     _strokeHeld = true;
     _strokeId = _layer->beginStroke();
+    _sprayState = 0x9E3779B9u ^ (uint32_t(_strokeId) * 2654435761u);     // seeded per stroke
     _flattenPlane = hit.pos.z + _offset;
+    _sentRay.reset();
+    _strokeStartMs = _nowMs;
+    _strokeTicks = 0;
     _lastCentre.reset();
     _softenNext = false;
+    _floaterBoxValid = false;
+    _floaterBalls.clear();
 
     if (_kind == Kind::Paint)
     {
@@ -943,6 +1202,8 @@ namespace Noggit
         setHint(why);
         _builder.beginEmpty(EverwoodStrokeConfig{});
       }
+      if (!out.empty())
+        _sentRay = _cursorRay;
       commit(out);
       return;
     }
@@ -965,6 +1226,8 @@ namespace Noggit
     }
     std::vector<Edit> out;
     _builder.begin(config, _nowMs, first, out);
+    if (!out.empty())
+      _sentRay = _cursorRay;
     commit(out);
   }
 
@@ -980,8 +1243,14 @@ namespace Noggit
     }
     else if (_aim && !pushPull)
       last = sculptSample(*_aim);
-    _builder.end(_nowMs, last, out);
+    bool const moved = !_sentRay || *_sentRay != _cursorRay;
+    _builder.end(_nowMs, last, out, moved, pushPull);
     commit(out);
+    // Sculpt > Smooth: the floaters under the brush go in the same stroke (one undo step).
+    if (_floaterBoxValid && _smoothFloaters && _kind == Kind::Sculpt && _mode == SculptMode::Smooth)
+      removeFloatersUnderBrush();
+    _floaterBoxValid = false;
+    _floaterBalls.clear();
     _strokeHeld = false;
     _actionOpen = false;
     _layer->endStroke();
@@ -1004,7 +1273,7 @@ namespace Noggit
 
     updateAim();
 
-    if (_kind == Kind::Bridge)
+    if (_kind == Kind::Bridge || _kind == Kind::Ramp)
       return;
 
     if (!_strokeHeld)
@@ -1020,10 +1289,20 @@ namespace Noggit
       return;
     }
 
+    // A click: the first dab went out at press and the cursor has not moved since. The frame after an edit can
+    // outlast the 125 ms resend interval, and re-aiming the same ray then lands in the dab's own crater (or on
+    // its own paint) and sent a second dab per click. Held still past the click window, the stroke goes on.
+    constexpr uint64_t CLICK_MS = 250;
+    bool const pushPull = _kind == Kind::Sculpt && (_mode == SculptMode::Push || _mode == SculptMode::Pull);
+    // Frames count too: one stalled frame (tile streaming, a GPU flush) can outlast the window by itself.
+    ++_strokeTicks;
+    if (!pushPull && _sentRay && *_sentRay == _cursorRay && (_nowMs - _strokeStartMs < CLICK_MS || _strokeTicks < 4))
+      return;
+
     std::vector<Edit> out;
     if (_aim)
     {
-      if (_kind == Kind::Sculpt && (_mode == SculptMode::Push || _mode == SculptMode::Pull))
+      if (pushPull)
       {
         Edit const sample = (_pushEdge != 0 && _softenNext && _lastCentre) ? softenSample(*_lastCentre) : pushPullSample(*_aim);
         _builder.update(_nowMs, sample, out);
@@ -1058,6 +1337,8 @@ namespace Noggit
     {
       _builder.tick(_nowMs, out);
     }
+    if (!out.empty())
+      _sentRay = _cursorRay;
     commit(out);
     if (!out.empty())
       updateStatus();
@@ -1065,11 +1346,20 @@ namespace Noggit
 
   void EverwoodTool::onMousePress(MousePressParameters const& params)
   {
-    if (params.button != Qt::LeftButton || _kind != Kind::Bridge)
+    if (params.button != Qt::LeftButton || (_kind != Kind::Bridge && _kind != Kind::Ramp))
       return;
     updateAim();
     if (!_aim)
       return;
+    if (_kind == Kind::Ramp)
+    {
+      // A click on the last point again finishes the path (like the bridge's second click).
+      if (_rampPoints.size() >= 2 && glm::distance(glm::vec2(_aim->pos), glm::vec2(_rampPoints.back())) < 1.5f)
+        confirmRamp();
+      else
+        addRampPoint(_aim->pos);
+      return;
+    }
     if (_bridgeA && _bridgeB)
       confirmBridge();
     else
@@ -1146,6 +1436,353 @@ namespace Noggit
     cancelBridge();
   }
 
+  // ------------------------------------------------------------------------------------ remove floaters
+  namespace
+  {
+    QString floaterText(FloaterPlan const& plan)
+    {
+      if (!plan.found)
+        return "No floaters found.";
+      QString s = QString("Removed %1 floaters (%2 edits)").arg(plan.removable).arg(plan.digs.size());
+      if (plan.skippedUnsafe)
+        s += QString(", left %1 (no safe way to dig without touching the ground)").arg(plan.skippedUnsafe);
+      return s + ".";
+    }
+  }
+
+  std::string EverwoodTool::removeFloaters()
+  {
+    if (_strokeHeld)
+      return "busy";
+    FloaterPlan const plan = _layer->planFloaters(uint32_t(std::max(_floaterMax, 1)), FloaterRegion{});
+    if (!plan.digs.empty())
+      applyStroke(plan.digs);
+    _floaterText = floaterText(plan);
+    updatePanel();
+    return _floaterText.toStdString();
+  }
+
+  void EverwoodTool::extendFloaterBox(Edit const& e)
+  {
+    Key lo, hi;
+    e.Bbox(lo, hi);
+    _floaterBalls.push_back({ e.pos[0] / VOXEL_SIZE, e.pos[1] / VOXEL_SIZE, e.pos[2] / VOXEL_SIZE, e.radius / VOXEL_SIZE });
+    if (!_floaterBoxValid)
+    {
+      _floaterLo = lo;
+      _floaterHi = hi;
+      _floaterBoxValid = true;
+      return;
+    }
+    for (int a = 0; a < 3; ++a)
+    {
+      _floaterLo[a] = std::min(_floaterLo[a], lo[a]);
+      _floaterHi[a] = std::max(_floaterHi[a], hi[a]);
+    }
+  }
+
+  // The smooth stroke's own undo step: the dig edits carry the stroke's id.
+  void EverwoodTool::removeFloatersUnderBrush()
+  {
+    FloaterRegion region;
+    region.all = false;
+    region.lo = _floaterLo;
+    region.hi = _floaterHi;
+    region.balls = _floaterBalls;
+    FloaterPlan const plan = _layer->planFloaters(uint32_t(std::max(_floaterMax, 1)), region);
+    for (Edit const& dig : plan.digs)
+      _layer->addEdit(dig, _strokeId);
+    _floaterText = floaterText(plan);
+    updatePanel();
+  }
+
+  // ------------------------------------------------------------------------------------- ramp / path
+  // The polyline of clicked ground points (WoW axes) with its arclength parameter. Heights: follow the clicked
+  // points' own heights (linear between them) or a fixed grade from the first point.
+  struct EverwoodTool::RampPath
+  {
+    std::vector<glm::vec3> p;
+    std::vector<float> s;                 // arclength at each point (xy)
+    std::vector<glm::vec2> dir;           // unit xy direction of each segment
+    float length = 0.f;
+    bool fixedAngle = false;
+    float tanA = 0.f;
+
+    bool build(std::vector<glm::vec3> const& pts, bool fixed, float angleDeg)
+    {
+      p.clear();
+      s.clear();
+      dir.clear();
+      for (glm::vec3 const& q : pts)
+        if (p.empty() || glm::distance(glm::vec2(q), glm::vec2(p.back())) >= 0.25f)
+          p.push_back(q);
+      if (p.size() < 2)
+        return false;
+      s.push_back(0.f);
+      for (size_t i = 1; i < p.size(); ++i)
+      {
+        glm::vec2 const d = glm::vec2(p[i]) - glm::vec2(p[i - 1]);
+        float const l = glm::length(d);
+        s.push_back(s.back() + l);
+        dir.push_back(d / l);
+      }
+      length = s.back();
+      fixedAngle = fixed;
+      tanA = std::tan(angleDeg * 0.017453292f);
+      return true;
+    }
+
+    size_t segment(float u) const
+    {
+      size_t i = 0;
+      while (i + 2 < p.size() && u > s[i + 1])
+        ++i;
+      return i;
+    }
+
+    // The path's xy at arclength u (extended along the first / last segment beyond the ends) and its direction.
+    glm::vec2 xyAt(float u, glm::vec2& d) const
+    {
+      size_t const i = segment(u);
+      d = dir[i];
+      return glm::vec2(p[i]) + d * (u - s[i]);
+    }
+
+    float heightAt(float u) const
+    {
+      u = std::clamp(u, 0.f, length);
+      if (fixedAngle)
+        return p[0].z + u * tanA;
+      size_t const i = segment(u);
+      float const t = s[i + 1] > s[i] ? (u - s[i]) / (s[i + 1] - s[i]) : 0.f;
+      return p[i].z + (p[i + 1].z - p[i].z) * t;
+    }
+  };
+
+  bool EverwoodTool::rampGround(float x, float y, float zHint, float& z) const
+  {
+    if (auto const hit = _layer->raycast(glm::vec3(x, y, zHint + 80.f), glm::vec3(0.f, 0.f, -1.f), 240.f))
+    {
+      z = hit->pos.z;
+      return true;
+    }
+    return _layer->rawGround(x, y, z);
+  }
+
+  void EverwoodTool::addRampPoint(glm::vec3 const& wow)
+  {
+    _rampPoints.push_back(wow);
+    updatePanel();
+  }
+
+  void EverwoodTool::cancelRamp()
+  {
+    _rampPoints.clear();
+    updatePanel();
+  }
+
+  // The edit scheme. Every edit is an ordinary mode 6 (LEVEL) or mode 2 (smooth) edit the game already replays.
+  //
+  // LEVEL clamps the field into a window around a HORIZONTAL plane (offset = param, in cm from pos.z): flat inside
+  // the dab's core (50 % of its radius), then a bank whose slope is the edge softness (60 / 45 / 30 deg) out to
+  // the radius. It cuts high ground and fills low ground, so dabs laid along the path, each with the plane height
+  // of its own place, make a ramp. Dabs applied later overwrite the ground of earlier ones inside their core, so
+  // the surface at path position s is owned by the dab centred `inner` (the core radius) ahead of it; every
+  // dab's plane is therefore the path height at (its arclength - inner), and the dabs run from arclength `inner`
+  // to L + inner: the surface is exactly the requested slope from A to B (a flat landing of about `inner` follows
+  // B; the strip starts at A). Pass 1: two wide bank tracks (radius 2 * bank width) just outside the flat strip;
+  // pass 2: the flat strip itself with small dabs (radius W / 2 clamped 2..6) on an odd number of tracks across
+  // the width, centre line included; so the centre line is not biased and the cross-slope error stays under
+  // 0.2 * inner * tan(slope). A dab's vertical box is pos.z +- r: where the ground under a dab is farther from the
+  // plane than that, the dab is stacked (same plane, same xy, one per vertical slab) so the whole cut or fill is
+  // reached. Last: one light smooth pass along the strip.
+  std::vector<Edit> EverwoodTool::rampEdits(std::vector<glm::vec3> const& points, QString* why) const
+  {
+    RampPath path;
+    if (!path.build(points, _rampSlope == 1, _rampAngle))
+    {
+      *why = "A ramp needs two points at least 0.25 yd apart.";
+      return {};
+    }
+    float const L = path.length;
+    if (L < 2.f || L > RAMP_MAX_LENGTH)
+    {
+      *why = QString("The path is %1 yd long; it must be 2 to %2 yd.").arg(double(L), 0, 'f', 0).arg(double(RAMP_MAX_LENGTH));
+      return {};
+    }
+    float const W = std::clamp(_rampWidth, 1.f, 32.f);
+    float const bw = _rampEdge == 0 ? 1.f : (_rampEdge == 1 ? 2.f : 4.f);
+    uint16_t const bankCode = _rampEdge == 0 ? 2 : (_rampEdge == 1 ? 0 : 1);   // v3.9 slope bits: 0 = 45, 1 = 30, 2 = 60 deg
+    uint8_t const strength = strengthU8(_rampStrength);
+
+    std::vector<Edit> edits;
+    auto level = [&](float u, float lateral, float r, float inner)
+    {
+      glm::vec2 d;
+      glm::vec2 c = path.xyAt(u, d);
+      c += glm::vec2(-d.y, d.x) * lateral;
+      float const plane = path.heightAt(u - inner);
+      // The ground under the dab (its centre and four points of its disc): LEVEL only reaches pos.z +- r, so a deep
+      // cut or fill is laid out as a stack of dabs of the same plane and xy, one per vertical slab (the clamp is
+      // per sample, so stacked slabs are the same as one tall dab).
+      float gLo = plane, gHi = plane;
+      glm::vec2 const side(-d.y, d.x);
+      glm::vec2 const probes[5] = { c, c + d * (0.7f * r), c - d * (0.7f * r), c + side * (0.7f * r), c - side * (0.7f * r) };
+      for (glm::vec2 const& q : probes)
+      {
+        float g;
+        if (rampGround(q.x, q.y, plane, g))
+        {
+          gLo = std::min(gLo, g);
+          gHi = std::max(gHi, g);
+        }
+      }
+      float const zlo = std::max(gLo - 0.75f, plane - 18.f), zhi = std::min(gHi + 0.75f, plane + 18.f);
+      float const slab = 2.f * (r - 0.5f);
+      int const slabs = std::max(1, int(std::ceil((zhi - zlo) / slab)));
+      for (int j = 0; j < slabs; ++j)
+      {
+        float const zc = slabs == 1 ? std::clamp((zlo + zhi) * 0.5f, plane - (r - 0.5f), plane + (r - 0.5f)) : zlo + (zhi - zlo) * (float(j) + 0.5f) / float(slabs);
+        int const off = std::clamp(int(std::lround((plane - zc) * 100.f)), -2047, 2047);
+        Edit e;
+        e.pos[0] = c.x;
+        e.pos[1] = c.y;
+        e.pos[2] = zc;
+        e.radius = r;
+        e.mode = MODE_LEVEL;
+        e.strength = strength;
+        e.param = uint16_t((off & 0x0fff) | (bankCode << 12));     // core bits 14-15 = 0: 50 %
+        edits.push_back(e);
+      }
+    };
+    auto pass = [&](float r, float inner, float spacing, std::vector<float> const& lats)
+    {
+      int const n = std::max(1, int(std::ceil(L / (spacing * inner))));
+      for (int k = 0; k <= n; ++k)
+      {
+        float const u = inner + L * float(k) / float(n);
+        for (float lat : lats)
+          level(u, lat, r, inner);
+      }
+    };
+
+    // Pass 1: the banks.
+    float const latBank = std::max(W * 0.5f - bw, 0.f);
+    pass(2.f * bw, bw, 0.8f, latBank < 0.05f ? std::vector<float>{ 0.f } : std::vector<float>{ -latBank, latBank });
+    // Pass 2: the flat strip.
+    float const rm = std::clamp(W * 0.5f, 2.f, 6.f);
+    float const innerM = rm * 0.5f;
+    float const half = std::max(W * 0.5f - innerM, 0.f);
+    std::vector<float> lats{ 0.f };
+    if (half >= 0.05f)
+    {
+      int const tracks = 2 * int(std::ceil(half / (1.2f * innerM))) + 1;
+      lats.clear();
+      for (int j = 0; j < tracks; ++j)
+        lats.push_back(-half + 2.f * half * float(j) / float(tracks - 1));
+    }
+    pass(rm, innerM, 0.6f, lats);
+
+    if (_rampSmooth)
+    {
+      float const rs = std::clamp(W * 0.5f + bw + 1.f, 3.f, 16.f);
+      int const n = std::max(1, int(std::ceil(L / (rs * 0.5f))));
+      for (int k = 0; k <= n; ++k)
+      {
+        float const u = L * float(k) / float(n);
+        glm::vec2 d;
+        glm::vec2 const c = path.xyAt(u, d);
+        Edit e;
+        e.pos[0] = c.x;
+        e.pos[1] = c.y;
+        e.pos[2] = path.heightAt(u);
+        e.radius = rs;
+        e.mode = MODE_SMOOTH;
+        e.strength = strengthU8(50.f);
+        e.param = WithSmoothPasses(SoftParam(FALLOFF_SMOOTH, 0), 0);
+        edits.push_back(e);
+      }
+    }
+    if (int(edits.size()) > RAMP_MAX_EDITS)
+    {
+      *why = QString("The path needs %1 edits; the limit is %2. Use a shorter path or a softer edge.").arg(edits.size()).arg(RAMP_MAX_EDITS);
+      return {};
+    }
+    return edits;
+  }
+
+  std::string EverwoodTool::confirmRamp()
+  {
+    if (_rampPoints.size() < 2)
+      return "Click at least two points first.";
+    QString why;
+    std::vector<Edit> const edits = rampEdits(_rampPoints, &why);
+    if (edits.empty())
+    {
+      if (_bridgeLabel)
+        _bridgeLabel->setText(why);
+      return why.toStdString();
+    }
+    applyStroke(edits);
+    _lastRampEdits = edits.size();
+    _rampPoints.clear();
+    updatePanel();
+    if (_bridgeLabel)
+      _bridgeLabel->setText(QString("Ramp built: %1 edits, one undo step.").arg(edits.size()));
+    return {};
+  }
+
+  void EverwoodTool::drawRamp(glm::mat4x4 const& mvp)
+  {
+    glm::vec4 const color(0.3f, 0.8f, 1.f, 1.f);
+    std::vector<glm::vec3> pts = _rampPoints;
+    if (_aim && (pts.empty() || glm::distance(glm::vec2(_aim->pos), glm::vec2(pts.back())) >= 0.25f))
+      pts.push_back(_aim->pos);
+    for (glm::vec3 const& q : _rampPoints)
+      _sphere.draw(mvp, wowToNoggit(q), color, 0.4f, 10, 8, 1.f);
+    if (_aim)
+      _sphere.draw(mvp, wowToNoggit(_aim->pos), glm::vec4(1.f), 0.3f, 8, 6, 1.f);
+
+    RampPath path;
+    if (!path.build(pts, _rampSlope == 1, _rampAngle))
+      return;
+    float const W = std::clamp(_rampWidth, 1.f, 32.f);
+    float const bw = _rampEdge == 0 ? 1.f : (_rampEdge == 1 ? 2.f : 4.f);
+    std::vector<glm::vec3> centre, flatL, flatR, bankL, bankR;
+    int const n = std::max(1, int(std::ceil(path.length)));
+    for (int k = 0; k <= n; ++k)
+    {
+      float const u = path.length * float(k) / float(n);
+      glm::vec2 d;
+      glm::vec2 const c = path.xyAt(u, d);
+      glm::vec2 const nrm(-d.y, d.x);
+      float const z = path.heightAt(u) + 0.25f;
+      auto at = [&](float lat) { return wowToNoggit(glm::vec3(c + nrm * lat, z)); };
+      centre.push_back(at(0.f));
+      flatL.push_back(at(W * 0.5f));
+      flatR.push_back(at(-W * 0.5f));
+      bankL.push_back(at(W * 0.5f + bw));
+      bankR.push_back(at(-W * 0.5f - bw));
+    }
+    std::vector<glm::vec3> seg;
+    auto strip = [&](std::vector<glm::vec3> const& line)
+    {
+      for (size_t i = 1; i < line.size(); ++i)
+      {
+        seg.push_back(line[i - 1]);
+        seg.push_back(line[i]);
+      }
+    };
+    strip(centre);
+    strip(flatL);
+    strip(flatR);
+    _line.drawSegments(mvp, seg, color);
+    seg.clear();
+    strip(bankL);
+    strip(bankR);
+    _line.drawSegments(mvp, seg, glm::vec4(0.3f, 0.8f, 1.f, 0.45f));
+  }
+
   void EverwoodTool::applyStroke(std::vector<Edit> const& edits)
   {
     if (NOGGIT_CUR_ACTION)
@@ -1188,6 +1825,11 @@ namespace Noggit
       return;
     }
     float const step = params.event.angleDelta().y() > 0 ? 0.5f : -0.5f;
+    if (_kind == Kind::Ramp)
+    {
+      _rampWidthBox->setValue(std::clamp(double(_rampWidth + step * 2.f), 1.0, 32.0));
+      return;
+    }
     _radiusBox->setValue(std::clamp(double(brushRadius() + step), 0.5, _kind == Kind::Paint ? double(PAINT3_MAX_RADIUS) : 16.0));
   }
 
@@ -1215,6 +1857,12 @@ namespace Noggit
     if (_kind == Kind::Flow)
     {
       renderFlow(mvp);
+      return;
+    }
+
+    if (_kind == Kind::Ramp)
+    {
+      drawRamp(mvp);
       return;
     }
 

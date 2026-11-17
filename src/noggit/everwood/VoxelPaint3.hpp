@@ -25,11 +25,13 @@
 
 namespace Noggit::Everwood::Voxel
 {
-  constexpr float PAINT3_MAX_RADIUS = 8.0f;       // the largest valid mode-7 radius, yards
+  constexpr float PAINT3_MAX_RADIUS = 16.0f;      // the largest valid mode-7 radius, yards (v3.11: 16, v3.10: 8)
   constexpr uint16_t PAINT_ID_MASK = 0x07ff;      // param bits 0-10: palette id
   constexpr uint16_t PAINT_FALLOFF_SHIFT = 11;    // bits 11-12: falloff (3 = smooth)
   constexpr uint16_t PAINT_ERASE = 1 << 13;       // bit 13: erase that id
   constexpr uint16_t PAINT3_REVEAL = 1 << 14;     // bit 14: lower every slot (id + erase ignored)
+  constexpr uint16_t PAINT3_HARD = 1 << 15;       // v3.11 bit 15: HARD core; bits 11-12 then index PAINT3_CORES
+  constexpr float PAINT3_CORES[4] = { 0.25f, 0.5f, 0.75f, 0.9f };
   constexpr size_t PAINT3_MAX_SLOTS = 4;          // 3D materials per voxel chunk (mirrors MCLY's 4)
   constexpr size_t PAINT3_BYTES = OWNED * 4;      // dense RGBA per owned sample = 131072
   constexpr size_t PAINT3_LAYER = size_t(C) * C;  // samples of one z-layer (the lazy storage unit)
@@ -38,19 +40,23 @@ namespace Noggit::Everwood::Voxel
   // paint.rs falloff_amount: u = 1 - d/r; smooth (u*u)*(3-2u), linear u, flat 1; round((s*w)*255) 0..255.
   uint8_t PaintFalloffAmount(float s, uint8_t falloff, float d, float r);
   // paint.rs inc / dec (u32 integer maths).
+  // paint3.rs hard_amount (v3.11): u = d/r; w = 1 when u <= core, else t = (u-c)/(1-c), v = 1-t, w = (v*v)*(3-2v).
+  uint8_t PaintHardAmount(float s, uint8_t core, float d, float r);
   uint8_t PaintInc(uint8_t a, uint8_t amt);
   uint8_t PaintDec(uint8_t a, uint8_t amt);
 
   // paint.rs DabOutcome
   enum class DabOutcome { Untouched, NoOp, Refused, Applied };
 
-  // paint3.rs Paint3Param: a decoded mode-7 param (bit 15 ignored).
+  // paint3.rs Paint3Param: a decoded mode-7 param (v3.11: bit 15 = HARD core).
   struct Paint3Param
   {
     uint16_t id = 0;
     uint8_t falloff = 0;                          // 0 smooth, 1 linear, 2 flat (3 decodes as smooth)
     bool erase = false;
     bool reveal = false;                          // wins over erase
+    int hard = -1;                                // v3.11 bit 15: core index 0..3 (bits 11-12), -1 = the v3.10 falloff
+    uint8_t Amount(float s, float d, float r) const;
     static Paint3Param FromParam(uint16_t p);
     uint16_t ToParam() const;
   };
