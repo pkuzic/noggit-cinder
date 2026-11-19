@@ -1156,6 +1156,34 @@ namespace Noggit::Everwood::Voxel
         dirtyLaterDabs(uint32_t(pos), e);           // the later edits moved down by one
     }
 
+    void Journal::RemoveMany(std::vector<size_t> const& descending)
+    {
+        bool bulk = m_paint3Orders.empty();
+        for (size_t pos : descending)
+            if (!bulk || (pos < m_edits.size() && IsPaint3(m_edits[pos])))
+            {
+                bulk = false;
+                break;
+            }
+        if (!bulk)
+        {
+            for (size_t pos : descending)
+                Remove(pos);
+            return;
+        }
+        // No dab anywhere: dirtyLaterDabs is a no-op for every removal, so only the edits and their index change.
+        std::vector<char> kill(m_edits.size(), 0);
+        for (size_t pos : descending)
+            if (pos < kill.size())
+                kill[pos] = 1;
+        size_t w = 0;
+        for (size_t r = 0; r < m_edits.size(); ++r)
+            if (!kill[r])
+                m_edits[w++] = m_edits[r];
+        m_edits.resize(w);
+        reindexSilently();
+    }
+
     void Journal::Reindex()
     {
         dirtyAllDabs();                             // the dabs before the change

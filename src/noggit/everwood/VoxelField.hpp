@@ -286,6 +286,9 @@ namespace Noggit::Everwood::Voxel
     void Add(Edit const& e);                    // appended in canonical order (seq ascending)
     void Insert(size_t pos, Edit const& e);     // filed at canonical position `pos` (out of order)
     void Remove(size_t pos);                    // dropped (undo / revert)
+    // Remove(p) for every position, which must be strictly descending. Same result; one reindex when the journal holds
+    // no mode-7 dab (an undo of a big stroke was quadratic).
+    void RemoveMany(std::vector<size_t> const& descending);
     std::vector<Edit> const& Edits() const { return m_edits; }
     std::vector<Edit>& MutableEdits() { return m_edits; }
     void Reindex();                             // after MutableEdits() was changed (every dab's box dirty)

@@ -126,12 +126,27 @@ namespace Noggit
     void cancelRamp();
     size_t rampPointCount() const { return _rampPoints.size(); }
     size_t lastRampEdits() const { return _lastRampEdits; }
+    double lastRampWork() const { return _rampWork; }
+    double lastRampEstimateMs() const { return _rampEstimateMs; }
     // One scripted stroke of exact edits, as the mouse would have produced them.
     void applyStroke(std::vector<Everwood::Voxel::Edit> const& edits);
     // Paint (caves): one dab where a ray meets the voxel surface (WoW axes), through the tool's own checks.
     // Returns an empty string when it painted, else why it did not.
     std::string paintRay(glm::vec3 const& origin, glm::vec3 const& dir);
     int paintTexture() const { return _paintTexture; }
+
+    // The cursor preview for the current settings (yards): `outer` the brush radius, `inner` the radius inside which
+    // the brush acts at full weight (0 = none: the weight starts to fall at the centre, or the setting has no
+    // core), `spray` the Paint (caves) spray disc radius (0 = spray off). Bridge: outer = its radius.
+    struct BrushPreview
+    {
+      float outer = 0.f;
+      float inner = 0.f;
+      float spray = 0.f;
+    };
+    BrushPreview brushPreview() const;
+    // The panel's "Map edits" line and whether it is shown in the warning colour.
+    QString journalLine(bool* warn) const;
 
   private:
     using Edit = Everwood::Voxel::Edit;
@@ -269,6 +284,9 @@ namespace Noggit
     float _rampStrength = 100.f;           // %
     bool _rampSmooth = true;               // a light smooth along the strip after the levelling
     size_t _lastRampEdits = 0;
+    mutable double _rampWork = 0.0;        // set by rampEdits: voxels in the planned edits' boxes
+    mutable double _rampEstimateMs = 0.0;  // set by rampEdits: estimated apply time
+    int _rampCap = 0;                      // smoke only: > 0 overrides the edit cap
     std::optional<Everwood::AimHit> _aim;
     glm::vec3 _viewDirWow{ 0.f, 0.f, -1.f };
 
@@ -301,6 +319,7 @@ namespace Noggit
     QLabel* _floaterLabel = nullptr;
     QPushButton* _confirmButton = nullptr;
     QPushButton* _cancelButton = nullptr;
+    QLabel* _journalLabel = nullptr;
     QLabel* _status = nullptr;
     QLabel* _hint = nullptr;
     QWidget* _paintBox = nullptr;
@@ -325,6 +344,7 @@ namespace Noggit
     QComboBox* _flowModeBox = nullptr;
     bool _updating = false;
 
+    std::vector<glm::vec3> _ring;          // the spray ring's segment points, reused every frame
     Noggit::Rendering::Primitives::Line _line;
     Noggit::Rendering::Primitives::Sphere _sphere;
     Noggit::Rendering::Primitives::WireBox _box;

@@ -22,7 +22,10 @@
 #include <opengl/context.hpp>
 #include <opengl/context.inl>
 
+#include <QtCore/QElapsedTimer>
+#include <QtCore/QLocale>
 #include <QtCore/QString>
+#include <QtGui/QGuiApplication>
 #include <QtGui/QWheelEvent>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
@@ -39,8 +42,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <unordered_set>
+
+namespace Noggit::Everwood { void profileAdd(char const* name, double ms); }
 
 namespace Noggit
 {
@@ -53,7 +59,19 @@ namespace Noggit
     constexpr int BRIDGE_MAX_EDITS = 400;
     constexpr float AIM_RANGE = 800.f;
     constexpr float RAMP_MAX_LENGTH = 300.f;
-    constexpr int RAMP_MAX_EDITS = 700;
+    // Ramp limits (measured in the lane-4 smoke runs on the lane-3 hillside, EVERWOOD-MODE.md): applying costs about
+    // 0.1 ms per edit plus 0.026 ms per 1000 voxels of the edits' boxes (4 r + 3 voxels a side), so big dabs cost far
+    // more than small ones (a loaded PC takes up to 1.8x as long). A ramp is refused above ~3 s of estimated apply
+    // time, or above 10000 edits (what the map journal replays at every load).
+    constexpr int RAMP_MAX_EDITS = 10000;
+    constexpr double RAMP_MAX_MS = 3000.0;
+    constexpr double RAMP_MS_PER_EDIT = 0.1;
+    constexpr double RAMP_MS_PER_VOXEL = 2.6e-5;
+    constexpr double RAMP_FEEDBACK_MS = 400.0;    // from this estimate on: wait cursor + "Building ramp..."
+    // Journal replay cost per edit when no measured load exists (ms; measured 0.3-1.5 ms per brush edit, 0.8 for
+    // 2k-10k edits, EVERWOOD-MODE.md) and the load time that turns the panel line amber (~2500 edits at 0.8 ms).
+    constexpr double JOURNAL_MS_PER_EDIT = 0.8;
+    constexpr double JOURNAL_WARN_MS = 2000.0;
 
     // sculpt.rs strength_u8: percent (1-100) to the wire strength /255.
     uint8_t strengthU8(float pct)
@@ -518,6 +536,10 @@ namespace Noggit
     _hint->setVisible(false);
     outer->addWidget(_hint);
 
+    _journalLabel = new QLabel(_panel);
+    _journalLabel->setWordWrap(true);
+    outer->addWidget(_journalLabel);
+
     _status = new QLabel(_panel);
     _status->setWordWrap(true);
     outer->addWidget(_status);
@@ -773,8 +795,43 @@ namespace Noggit
     _updating = false;
   }
 
+  // Journal size and load time. Every stroke rewrites <project>/everwood/voxels/<map>.mvoxj, and Noggit and the game
+  // replay all of it when the map loads: the time is the measured read + replay of the last map open, scaled up
+  // by the edits added since (an estimate, marked "~"); with no journal at open, the per-edit estimate.
+  QString EverwoodTool::journalLine(bool* warn) const
+  {
+    size_t const edits = _layer->liveEditCount();
+    uint64_t const bytes = _layer->journalBytes();
+    Everwood::JournalStats const& st = _layer->loadStats();
+    double ms = double(edits) * JOURNAL_MS_PER_EDIT;
+    bool estimated = true;
+    if (st.loaded && st.edits > 0)
+    {
+      ms = (st.readMs + st.replayMs) * double(edits) / double(st.edits);
+      estimated = edits != st.edits;
+    }
+    if (warn)
+      *warn = ms >= JOURNAL_WARN_MS;
+    QString size;
+    if (bytes >= 1024ull * 1024ull)
+      size = QString("%1 MB").arg(double(bytes) / (1024.0 * 1024.0), 0, 'f', 1);
+    else
+      size = QString("%1 KB").arg(std::max<uint64_t>(1, (bytes + 512) / 1024));
+    QString const time = ms < 100.0 ? QString("under 0.1 s") : QString("%1%2 s").arg(estimated ? "~" : "").arg(ms / 1000.0, 0, 'f', 1);
+    return QString("Map edits: %1 (%2), loads in %3").arg(QLocale(QLocale::English).toString(qulonglong(edits))).arg(size).arg(time);
+  }
+
   void EverwoodTool::updateStatus()
   {
+    if (_journalLabel)
+    {
+      bool warn = false;
+      _journalLabel->setText(journalLine(&warn));
+      _journalLabel->setStyleSheet(warn ? "color: #e0a040;" : "");
+      _journalLabel->setToolTip(warn ? "This map's edit history is large. Noggit and the game replay all of it every time the map "
+                                       "loads, so the map will load slower in the editor and in the game."
+                                     : "Every voxel edit is kept in this map's journal and replayed when the map loads.");
+    }
     if (!_status)
       return;
     _status->setText(QString("%1 edits in %2 strokes, %3 cave-painted blocks\nSaved after every stroke to:\n%4")
@@ -847,6 +904,7 @@ namespace Noggit
     if (key == "ramp_slope") return pick(_rampSlopeBox, { "follow", "angle" });
     if (key == "ramp_angle") { _rampAngleBox->setValue(value.toDouble()); return true; }
     if (key == "ramp_edge") return pick(_rampEdgeBox, { "sharp", "normal", "soft" });
+    if (key == "ramp_cap") { _rampCap = value.toInt(); return true; }   // smoke: measure with another cap
     if (key == "ramp_smooth") { _rampSmoothBox->setChecked(on); return true; }
     if (key == "flow_mode") return pick(_flowModeBox, { "paint", "erase" });
     if (key == "flow_radius") { _flowRadiusBox->setValue(value.toDouble()); return true; }
@@ -1703,9 +1761,20 @@ namespace Noggit
         edits.push_back(e);
       }
     }
-    if (int(edits.size()) > RAMP_MAX_EDITS)
+    int const cap = _rampCap > 0 ? _rampCap : RAMP_MAX_EDITS;
+    double work = 0.0;       // voxels in the edits' boxes: the cost of applying them follows this and the count
+    for (Edit const& e : edits)
     {
-      *why = QString("The path needs %1 edits; the limit is %2. Use a shorter path or a softer edge.").arg(edits.size()).arg(RAMP_MAX_EDITS);
+      double const side = 4.0 * double(e.radius) + 3.0;
+      work += side * side * side;
+    }
+    _rampWork = work;
+    _rampEstimateMs = double(edits.size()) * RAMP_MS_PER_EDIT + work * RAMP_MS_PER_VOXEL;
+    if (int(edits.size()) > cap || (_rampCap <= 0 && _rampEstimateMs > RAMP_MAX_MS))
+    {
+      *why = QString("The path needs %1 edits (about %2 s to build); the limit is %3 edits or about %4 s. "
+                     "Split it into shorter paths, or use a narrower width.")
+               .arg(edits.size()).arg(_rampEstimateMs / 1000.0, 0, 'f', 1).arg(cap).arg(RAMP_MAX_MS / 1000.0, 0, 'f', 0);
       return {};
     }
     return edits;
@@ -1723,7 +1792,20 @@ namespace Noggit
         _bridgeLabel->setText(why);
       return why.toStdString();
     }
+    // A big ramp takes a moment: say so (wait cursor + the panel line) so the editor does not look frozen.
+    bool const slow = _rampEstimateMs >= RAMP_FEEDBACK_MS;
+    if (slow)
+    {
+      QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+      if (_bridgeLabel)
+      {
+        _bridgeLabel->setText(QString("Building ramp... %1 edits").arg(edits.size()));
+        _bridgeLabel->repaint();
+      }
+    }
     applyStroke(edits);
+    if (slow)
+      QGuiApplication::restoreOverrideCursor();
     _lastRampEdits = edits.size();
     _rampPoints.clear();
     updatePanel();
@@ -1789,7 +1871,9 @@ namespace Noggit
       NOGGIT_ACTION_MGR->endAction();
     _strokeId = _layer->beginStroke();
     openAction(ActionModalityControllers::eNONE);
+    _layer->beginBatch();
     commit(edits);
+    _layer->endBatch();
     NOGGIT_ACTION_MGR->endAction();
     _layer->endStroke();
     updateStatus();
@@ -1833,21 +1917,64 @@ namespace Noggit
     _radiusBox->setValue(std::clamp(double(brushRadius() + step), 0.5, _kind == Kind::Paint ? double(PAINT3_MAX_RADIUS) : 16.0));
   }
 
+  // Where the brush's weight is full: sculpt soft brushes (Dig / Build / Smooth, falloff smooth or linear) weigh 1 up
+  // to radius * hardness %, Flatten up to radius - max(radius / 4, 1) (world.rs MODE_FLATTEN band), Paint (caves)
+  // with a hard core up to radius * core. A flat falloff, a hard edge, Push / Pull and the smooth Paint falloff
+  // have no such radius: 0.
+  EverwoodTool::BrushPreview EverwoodTool::brushPreview() const
+  {
+    BrushPreview b;
+    if (_kind == Kind::Paint)
+    {
+      b.outer = std::clamp(_paintRadius, PAINT_RADIUS_MIN, PAINT3_MAX_RADIUS);
+      if (_paintHard >= 0 && _paintHard < 4)
+        b.inner = b.outer * PAINT3_CORES[_paintHard];
+      if (_spray)
+        b.spray = _spraySize;
+    }
+    else if (_kind == Kind::Sculpt)
+    {
+      b.outer = _radius;
+      bool const soft = !_hard && (_mode == SculptMode::Dig || _mode == SculptMode::Build || _mode == SculptMode::Smooth);
+      float const h = std::clamp(std::round(_hardness), 0.f, 100.f);
+      if (soft && _falloff != FALLOFF_FLAT && h >= 1.f)
+        b.inner = _radius * h / 100.f;
+    }
+    else if (_kind == Kind::Flatten)
+    {
+      b.outer = _radius;
+      float const core = _radius - std::max(_radius * 0.25f, 1.f);
+      if (core > 0.05f)
+        b.inner = core;
+    }
+    else if (_kind == Kind::Bridge)
+    {
+      b.outer = bridgeSpec().radius;
+    }
+    return b;
+  }
+
   void EverwoodTool::postRender()
   {
     if (mapView()->get_editing_mode() != editing_mode::everwood)
       return;
 
+    struct DrawProbe   // smoke "prof": the cost of the cursor / path drawing per frame
+    {
+      std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+      ~DrawProbe() { profileAdd("brush.draw", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()); }
+    } const drawProbe;
+
     glm::mat4x4 const modelView = mapView()->model_view();
     glm::mat4x4 const projection = mapView()->projection();
     glm::mat4x4 const mvp = projection * modelView;
 
-    auto drawBrush = [&](glm::vec3 const& wow, float radius, uint8_t shape, glm::vec4 const& color)
+    auto drawBrush = [&](glm::vec3 const& wow, float radius, uint8_t shape, glm::vec4 const& color, float alpha = 0.25f)
     {
       glm::vec3 const p = wowToNoggit(wow);
       if (shape == SHAPE_SPHERE)
       {
-        _sphere.draw(mvp, p, color, radius, 24, 14, 0.25f);
+        _sphere.draw(mvp, p, color, radius, 24, 14, alpha);
         return;
       }
       // Both other shapes are boxes in WoW axes; for the cylinder this is its bounding box.
@@ -1890,7 +2017,35 @@ namespace Noggit
       bool const ok = _layer->editedWeightAt(*_aim) >= PAINT_EDITED_MIN && (_paintReveal || _paintTexture >= 0);
       glm::vec4 const color = !ok ? glm::vec4(0.6f, 0.6f, 0.6f, 1.f)
                             : (_paintErase || _paintReveal ? glm::vec4(1.f, 0.5f, 0.9f, 1.f) : glm::vec4(0.75f, 0.45f, 1.f, 1.f));
-      drawBrush(_aim->pos + _aim->normal * 0.5f, std::clamp(_paintRadius, PAINT_RADIUS_MIN, PAINT3_MAX_RADIUS), SHAPE_SPHERE, color);
+      BrushPreview const pv = brushPreview();
+      glm::vec3 const centre = _aim->pos + _aim->normal * 0.5f;
+      drawBrush(centre, pv.outer, SHAPE_SPHERE, color);
+      if (pv.inner > 0.f)
+        drawBrush(centre, pv.inner, SHAPE_SPHERE, glm::vec4(glm::min(glm::vec3(color) * 1.25f + 0.1f, glm::vec3(1.f)), 1.f), 0.6f);
+      if (pv.spray > 0.f)
+      {
+        // The spray's scatter disc: the plane through the dab centre, perpendicular to the aimed normal (the same
+        // basis sprayDabs scatters in), as a ring of line segments that follows slopes and walls.
+        glm::vec3 n = _aim->normal;
+        if (!(glm::length(n) > 1e-4f))
+          n = glm::vec3(0.f, 0.f, 1.f);
+        n = glm::normalize(n);
+        glm::vec3 const helper = std::fabs(n.z) < 0.9f ? glm::vec3(0.f, 0.f, 1.f) : glm::vec3(1.f, 0.f, 0.f);
+        glm::vec3 const u = glm::normalize(glm::cross(n, helper));
+        glm::vec3 const v = glm::cross(n, u);
+        constexpr int RING = 48;
+        _ring.clear();
+        glm::vec3 prev = wowToNoggit(centre + u * pv.spray);
+        for (int i = 1; i <= RING; ++i)
+        {
+          float const th = 6.2831853f * float(i) / float(RING);
+          glm::vec3 const q = wowToNoggit(centre + (u * std::cos(th) + v * std::sin(th)) * pv.spray);
+          _ring.push_back(prev);
+          _ring.push_back(q);
+          prev = q;
+        }
+        _line.drawSegments(mvp, _ring, glm::vec4(1.f, 1.f, 1.f, 1.f));
+      }
     }
     else if (_aim)
     {
@@ -1905,7 +2060,11 @@ namespace Noggit
         else
           color = glm::vec4(0.5f, 0.7f, 1.f, 1.f);
       }
-      drawBrush(_aim->pos, _radius, usesShape ? _shape : uint8_t(SHAPE_SPHERE), color);
+      BrushPreview const pv = brushPreview();
+      uint8_t const shape = usesShape ? _shape : uint8_t(SHAPE_SPHERE);
+      drawBrush(_aim->pos, pv.outer, shape, color);
+      if (pv.inner > 0.f)
+        drawBrush(_aim->pos, pv.inner, shape, glm::vec4(glm::min(color.r * 1.2f + 0.1f, 1.f), glm::min(color.g * 1.2f + 0.1f, 1.f), glm::min(color.b * 1.2f + 0.1f, 1.f), 1.f), 0.6f);
     }
   }
 

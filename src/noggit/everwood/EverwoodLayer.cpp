@@ -51,6 +51,16 @@ namespace Noggit::Everwood
     explicit ProfScope(char const* n) : name(n) {}
     ~ProfScope() { auto& s = g_prof[name]; s.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); ++s.n; }
   };
+  void profileAdd(char const* name, double ms) { auto& s = g_prof[name]; s.ms += ms; ++s.n; }
+  bool profileGet(char const* name, long& n, double& ms)
+  {
+    auto const it = g_prof.find(name);
+    if (it == g_prof.end())
+      return false;
+    n = it->second.n;
+    ms = it->second.ms;
+    return true;
+  }
   std::string profileText(bool reset)
   {
     std::string out;
@@ -412,6 +422,7 @@ namespace Noggit::Everwood
 
     ++_nextSeq;
     _nextNonce = uint16_t(_nextNonce + 1);
+    _bytesValid = false;
     _entries.push_back({ edit, false });
     _journal.Add(edit);
     // Appended in canonical order: the dab applied to the live field equals the full replay, and a density
@@ -432,7 +443,26 @@ namespace Noggit::Everwood
       ProfScope p("ApplyEdit");
       changed = _field.ApplyEdit(edit, &added);
     }
+    if (changed.empty() && added.empty())
+      profileAdd("edit.noop", 0.0);
     noteChanged(changed, &added);
+    if (_batchDepth == 0)
+    {
+      ProfScope p("flushColumns");
+      flushColumns();
+    }
+  }
+
+  // A scripted stroke (ramp, bridge, floaters): the carve masks and mesh sets are recomputed once at the end instead
+  // of after every edit. The field and the journal are identical; only when the masks are rewritten differs.
+  void EverwoodLayer::beginBatch()
+  {
+    ++_batchDepth;
+  }
+
+  void EverwoodLayer::endBatch()
+  {
+    if (_batchDepth > 0 && --_batchDepth == 0)
     {
       ProfScope p("flushColumns");
       flushColumns();
@@ -472,7 +502,10 @@ namespace Noggit::Everwood
 
     // The closure on both sides of the change: a chunk may be linked to the stroke only through an edit of
     // the stroke itself (undo) or only once it is back (redo).
+    std::optional<ProfScope> pu;
+    pu.emplace("undo.closure");
     std::set<Key> closure = touched.empty() ? std::set<Key>{} : _journal.ReadClosure(touched);
+    pu.emplace("undo.journal");
 
     // The journal changes edit by edit (Remove / Insert at the canonical position), so its paint dirty set
     // holds exactly the chunks whose 3D paint the change can alter.
@@ -492,8 +525,7 @@ namespace Noggit::Everwood
       for (Entry& e : _entries)
         if (e.edit.stroke == stroke)
           e.undone = true;
-      for (auto it = positions.rbegin(); it != positions.rend(); ++it)
-        _journal.Remove(*it);
+      _journal.RemoveMany(std::vector<size_t>(positions.rbegin(), positions.rend()));
     }
     else
     {
@@ -516,6 +548,7 @@ namespace Noggit::Everwood
       closure.insert(after.begin(), after.end());
     }
 
+    pu.emplace("undo.activate");
     std::vector<Key> added;
     if (!undone)
       for (Key const& k : closure)
@@ -536,12 +569,16 @@ namespace Noggit::Everwood
       if (_field.IsActive(k))
         keys.push_back(k);
     std::vector<Key> const all(closure.begin(), closure.end());
+    pu.emplace("undo.rebuild");
     _field.RebuildPaint(keys, dirty, _journal.EditsFor(all));
 
+    pu.emplace("undo.flush");
     noteChanged(keys, &added);
     notePaintChanged(dirty);
     flushColumns();
+    pu.emplace("undo.save");
     save();
+    pu.reset();
   }
 
   size_t EverwoodLayer::strokeCount() const
@@ -977,11 +1014,8 @@ namespace Noggit::Everwood
     return _projectPath + "/everwood/voxels/" + _mapDirectory + ".mvoxj";
   }
 
-  bool EverwoodLayer::save()
+  std::string EverwoodLayer::journalText() const
   {
-    QString const path = QString::fromStdString(filePath());
-    QDir().mkpath(QFileInfo(path).absolutePath());
-
     std::ostringstream out;
     out << "{\n\"format\":\"mvoxj\",\n\"version\":1,\n\"wire\":\"EDIT3 CONTRACT v3.10\",\n"
         << "\"mapDirectory\":" << jsonString(_mapDirectory) << ",\n\"map\":" << _mapId << ",\n"
@@ -994,6 +1028,28 @@ namespace Noggit::Everwood
       first = false;
     }
     out << "\n]\n}\n";
+    return out.str();
+  }
+
+  uint64_t EverwoodLayer::journalBytes()
+  {
+    if (!_bytesValid)
+    {
+      _bytesCache = journalText().size();
+      _bytesValid = true;
+    }
+    return _bytesCache;
+  }
+
+  bool EverwoodLayer::save()
+  {
+    ProfScope p_save("save");
+    QString const path = QString::fromStdString(filePath());
+    QDir().mkpath(QFileInfo(path).absolutePath());
+
+    std::string const text = journalText();
+    _bytesCache = text.size();
+    _bytesValid = true;
 
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
@@ -1001,7 +1057,6 @@ namespace Noggit::Everwood
       LogError << "Everwood: cannot write " << filePath() << std::endl;
       return false;
     }
-    std::string const text = out.str();
     file.write(text.data(), qint64(text.size()));
     return file.commit();
   }
@@ -1009,8 +1064,10 @@ namespace Noggit::Everwood
   bool EverwoodLayer::load()
   {
     QFile file(QString::fromStdString(filePath()));
+    _loadStats = JournalStats{};
     if (!file.exists())
       return true;
+    auto const tRead = std::chrono::steady_clock::now();
     if (!file.open(QIODevice::ReadOnly))
     {
       LogError << "Everwood: cannot read " << filePath() << std::endl;
@@ -1054,8 +1111,18 @@ namespace Noggit::Everwood
     if (_nextStroke == 0)
       _nextStroke = 1;
 
+    auto const tReplay = std::chrono::steady_clock::now();
     reseed();
-    Log << "Everwood: " << _journal.Edits().size() << " voxel edits loaded from " << filePath() << std::endl;
+    auto const tDone = std::chrono::steady_clock::now();
+    _loadStats.loaded = true;
+    _loadStats.edits = _journal.Edits().size();
+    _loadStats.bytes = uint64_t(file.size());
+    _loadStats.readMs = std::chrono::duration<double, std::milli>(tReplay - tRead).count();
+    _loadStats.replayMs = std::chrono::duration<double, std::milli>(tDone - tReplay).count();
+    _bytesCache = _loadStats.bytes;
+    _bytesValid = true;
+    Log << "Everwood: " << _journal.Edits().size() << " voxel edits loaded from " << filePath() << " (" << _loadStats.bytes
+        << " bytes, read " << int(_loadStats.readMs) << " ms, replay " << int(_loadStats.replayMs) << " ms)" << std::endl;
     return true;
   }
 

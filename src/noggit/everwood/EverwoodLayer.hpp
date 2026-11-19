@@ -61,6 +61,16 @@ namespace Noggit::Everwood
     glm::vec4 color{ 1.f };
   };
 
+  // What the last journal load cost (Everwood panel "Map edits" line, smoke `journal`).
+  struct JournalStats
+  {
+    bool loaded = false;        // a journal file was read
+    size_t edits = 0;           // live edits it held
+    uint64_t bytes = 0;         // its size on disk
+    double readMs = 0;          // file read + JSON parse + wire decode
+    double replayMs = 0;        // every edit applied to the field + the carve masks (mesh builds come later, per frame)
+  };
+
   class EverwoodLayer
   {
   public:
@@ -78,6 +88,8 @@ namespace Noggit::Everwood
     // Stamps seq, nonce, stroke and map, journals and applies. Invalid edits are dropped.
     void addEdit(Voxel::Edit edit, uint16_t stroke);
     void endStroke();
+    void beginBatch();
+    void endBatch();
 
     // Undo (true) / redo (false) one stroke: the canonical rebuild of its read closure.
     void setStrokeUndone(uint16_t stroke, bool undone);
@@ -124,6 +136,9 @@ namespace Noggit::Everwood
     // ---- storage
     bool save();
     bool load();
+    JournalStats const& loadStats() const { return _loadStats; }
+    // The live journal's size as the .mvoxj file holds it (exact after save / load, else computed).
+    uint64_t journalBytes();
     // Writes the documented export file; returns its path, empty on failure.
     std::string exportEdits(std::string const& projectName);
     // Forget the cached ADT heights and replay everything (the project's ADTs changed).
@@ -256,6 +271,7 @@ namespace Noggit::Everwood
     uint64_t tileHeightStamp(int tileX, int tileY) const;
 
     void rebuildJournal();
+    std::string journalText() const;
     void noteChanged(std::vector<Voxel::Key> const& keys, std::vector<Voxel::Key> const* added);
     // 3D paint changed in these chunks: rebuild the meshes that read them (own + the window apron).
     void notePaintChanged(std::vector<Voxel::Key> const& keys);
@@ -287,6 +303,10 @@ namespace Noggit::Everwood
     uint32_t _nextSeq = 1;
     uint16_t _nextNonce = 1;
     uint16_t _nextStroke = 1;
+    int _batchDepth = 0;
+    JournalStats _loadStats;
+    uint64_t _bytesCache = 0;
+    bool _bytesValid = false;
 
     std::unordered_map<int, std::shared_ptr<Adt::Tile>> _tiles;   // tileX * 64 + tileY, null = no file
     std::unordered_map<int, uint64_t> _tileStamps;                 // the height stamp each cached tile was built at

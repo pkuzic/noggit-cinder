@@ -42,7 +42,7 @@
 #include <QtGui/QImage>
 #include <QtGui/QMouseEvent>
 #include <QtWidgets/QApplication>
-namespace Noggit::Everwood { std::string profileText(bool reset); }
+namespace Noggit::Everwood { std::string profileText(bool reset); bool profileGet(char const* name, long& n, double& ms); }
 #include <QtWidgets/QDialog>
 
 #include <chrono>
@@ -482,13 +482,14 @@ namespace Noggit::Everwood
         _held = Qt::NoButton;
         mouse(QEvent::MouseButtonRelease, a.value(1).toInt(), a.value(2).toInt(), Qt::LeftButton, _held);
       }
-      else if (cmd == "undo")
+      else if (cmd == "undo" || cmd == "redo")
       {
-        requireTool()->undo();
-      }
-      else if (cmd == "redo")
-      {
-        requireTool()->redo();
+        auto const t0 = clock::now();
+        if (cmd == "undo")
+          requireTool()->undo();
+        else
+          requireTool()->redo();
+        report(cmd.toStdString() + " took " + std::to_string(std::chrono::duration<double, std::milli>(clock::now() - t0).count()) + " ms");
       }
       else if (cmd == "edit")
       {
@@ -643,11 +644,13 @@ namespace Noggit::Everwood
       {
         // ramp_apply [ok|refused]: the "Build ramp" button
         auto* tool = requireTool();
+        auto const t0 = clock::now();
         std::string const why = tool->confirmRamp();
+        double const ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
         if (why.empty())
           _lastRamp = _rampLog;
         _rampLog.clear();
-        report(why.empty() ? "ramp built, " + std::to_string(tool->lastRampEdits()) + " edits" : "ramp refused: " + why);
+        report(why.empty() ? "ramp built, " + std::to_string(tool->lastRampEdits()) + " edits in " + std::to_string(ms) + " ms, work " + std::to_string(tool->lastRampWork()) + " voxels, estimate " + std::to_string(tool->lastRampEstimateMs()) + " ms" : "ramp refused: " + why);
         if (a.size() > 1)
           expect(why.empty() == (a.value(1) == "ok"), "ramp_apply " + a.value(1).toStdString());
       }
@@ -1008,6 +1011,120 @@ namespace Noggit::Everwood
       {
         report("prof\n" + Noggit::Everwood::profileText(a.value(1) != "keep"));
       }
+      else if (cmd == "perf_begin")
+      {
+        // perf_begin / perf_end: frames, FPS and the draw / brush draw cost between the two (reset the probes first)
+        Noggit::Everwood::profileText(true);
+        _perfT0 = clock::now();
+      }
+      else if (cmd == "perf_end")
+      {
+        double const secs = std::chrono::duration<double>(clock::now() - _perfT0).count();
+        long n = 0, bn = 0;
+        double ms = 0, bms = 0, mms = 0, sms = 0;
+        long mn = 0, sn = 0;
+        Noggit::Everwood::profileGet("draw", n, ms);
+        Noggit::Everwood::profileGet("brush.draw", bn, bms);
+        Noggit::Everwood::profileGet("buildMesh", mn, mms);
+        Noggit::Everwood::profileGet("buildMesh.soft", sn, sms);
+        char b[400];
+        std::snprintf(b, sizeof b, "perf %.2f s: layer draws %ld (%.1f fps), draw avg %.3f ms, brush draws %ld avg %.4f ms, buildMesh %ld total %.1f ms, soft %ld total %.1f ms",
+                      secs, n, secs > 0 ? double(n) / secs : 0.0, n ? ms / double(n) : 0.0, bn, bn ? bms / double(bn) : 0.0, mn, mms, sn, sms);
+        report(b);
+      }
+      else if (cmd == "expect_brush_preview")
+      {
+        // expect_brush_preview <outer> <inner> <spray>: the cursor preview's radii for the current settings (yd)
+        auto const pv = requireTool()->brushPreview();
+        report("brush preview outer " + std::to_string(pv.outer) + " inner " + std::to_string(pv.inner) + " spray " + std::to_string(pv.spray));
+        bool const ok = std::fabs(pv.outer - f(1)) < 0.01f && std::fabs(pv.inner - f(2)) < 0.01f && std::fabs(pv.spray - f(3)) < 0.01f;
+        expect(ok, "brush preview " + a.value(1).toStdString() + " " + a.value(2).toStdString() + " " + a.value(3).toStdString());
+      }
+      else if (cmd == "journal")
+      {
+        // journal: the map's edit count, journal bytes and the last load's read / replay time
+        auto* layer = requireTool()->layer();
+        auto const& st = layer->loadStats();
+        report("journal edits " + std::to_string(layer->liveEditCount()) + " bytes " + std::to_string(layer->journalBytes())
+               + " | last load: " + (st.loaded ? "edits " + std::to_string(st.edits) + " bytes " + std::to_string(st.bytes)
+                                                    + " read_ms " + std::to_string(st.readMs) + " replay_ms " + std::to_string(st.replayMs)
+                                                  : std::string("none")));
+      }
+      else if (cmd == "expect_journal_edits")
+      {
+        auto* layer = requireTool()->layer();
+        expect(layer->liveEditCount() == size_t(a.value(1).toLongLong()),
+               "journal edits " + std::to_string(layer->liveEditCount()) + " vs " + a.value(1).toStdString());
+      }
+      else if (cmd == "expect_journal_label")
+      {
+        // expect_journal_label <normal|warn> [text...]: the panel's Map edits line (and whether it is in the warning colour)
+        bool warn = false;
+        QString const text = requireTool()->journalLine(&warn);
+        report("journal label: " + text.toStdString() + (warn ? " [WARN]" : " [normal]"));
+        bool ok = warn == (a.value(1) == "warn");
+        if (a.size() > 2)
+          ok = ok && text.contains(line.section(' ', 2));
+        expect(ok, "journal label " + a.value(1).toStdString() + (a.size() > 2 ? " contains '" + line.section(' ', 2).toStdString() + "'" : std::string()));
+      }
+      else if (cmd == "reload_journal")
+      {
+        // reload_journal: read the journal file again and replay it (what a map open does); reports the timing
+        auto* layer = requireTool()->layer();
+        layer->load();
+        auto const& st = layer->loadStats();
+        report("reload_journal edits " + std::to_string(st.edits) + " bytes " + std::to_string(st.bytes) + " read_ms " + std::to_string(st.readMs)
+               + " replay_ms " + std::to_string(st.replayMs));
+      }
+      else if (cmd == "edits_batch")
+      {
+        // edits_batch <n> <seed> <cx> <cy> <span>: ONE stroke of n pseudo-random ordinary edits (drag-like runs of dig / build /
+        // smooth / flatten dabs, radius 1-6) on the ground within +-span yd of (cx, cy); reports how long they took
+        auto* tool = requireTool();
+        int const n = a.value(1).toInt();
+        uint32_t x = uint32_t(a.value(2).toUInt()) * 2654435761u + 1u;
+        auto next = [&x]() { x ^= x << 13; x ^= x >> 17; x ^= x << 5; return float(x >> 8) / 16777216.f; };
+        float const cx = f(3), cy = f(4), span = f(5);
+        std::vector<Noggit::Everwood::Voxel::Edit> edits;
+        edits.reserve(size_t(n));
+        float px = cx, py = cy, dx = 1.f, dy = 0.f;
+        int run = 0;
+        while (int(edits.size()) < n)
+        {
+          if (run-- <= 0)
+          {
+            px = cx + (next() * 2.f - 1.f) * span;
+            py = cy + (next() * 2.f - 1.f) * span;
+            float const th = next() * 6.2831853f;
+            dx = std::cos(th);
+            dy = std::sin(th);
+            run = 20 + int(next() * 60.f);
+          }
+          px += dx * 0.9f;
+          py += dy * 0.9f;
+          float gz = 0.f;
+          if (!tool->layer()->rawGround(px, py, gz))
+          {
+            run = 0;
+            continue;
+          }
+          Noggit::Everwood::Voxel::Edit e;
+          float const k = next();
+          e.pos[0] = px;
+          e.pos[1] = py;
+          e.pos[2] = gz + (next() - 0.5f) * 2.f;
+          e.radius = 1.f + next() * 5.f;
+          e.strength = uint8_t(60 + int(next() * 150.f));
+          if (k < 0.4f) { e.mode = 0; e.param = Noggit::Everwood::Voxel::SoftParam(0, uint8_t(next() * 60.f)); }
+          else if (k < 0.7f) { e.mode = 1; e.param = Noggit::Everwood::Voxel::SoftParam(0, uint8_t(next() * 60.f)); }
+          else if (k < 0.9f) { e.mode = 2; e.param = Noggit::Everwood::Voxel::SoftParam(0, 0); }
+          else { e.mode = 3; e.param = 0; }
+          edits.push_back(e);
+        }
+        auto const t0 = clock::now();
+        tool->applyStroke(edits);
+        report("edits_batch " + std::to_string(n) + " edits in " + std::to_string(std::chrono::duration<double, std::milli>(clock::now() - t0).count()) + " ms");
+      }
       else if (cmd == "shift")
       {
         _view->_smoke_hold_shift = a.value(1).toInt() != 0;
@@ -1213,6 +1330,7 @@ namespace Noggit::Everwood
     };
     std::map<std::string, FloaterSnap> _snaps;
     std::vector<glm::vec3> _rampLog, _lastRamp;
+    clock::time_point _perfT0 = clock::now();
 
     int _left = 2580, _top = 20, _width = 1500, _height = 950;
 

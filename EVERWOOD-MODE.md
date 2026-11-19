@@ -44,6 +44,40 @@ this, a raised ground stayed hidden under the edit while the voxel surface kept 
 into a hole. **Re-seed from saved ADTs** replays every edit on the heights as saved on disk now (use it after
 replacing ADT files outside Noggit).
 
+## Cursor preview (brush core, spray)
+The cursor sphere is the brush radius. Where the brush acts at full weight inside a falling edge, a second, stronger
+sphere (or box, for cube / cylinder) marks that core:
+- Sculpt Dig / Build / Smooth with a soft falloff (smooth or linear) and Hardness >= 1 %: radius x hardness.
+- Flatten: radius - max(radius / 4, 1 yd), the world.rs band (none under 1 yd).
+- Paint (caves) with a hard core 25 / 50 / 75 / 90 %: radius x core.
+No core is drawn where none is defined: Hardness 0, a Flat falloff, Hard edge, Push / Pull, the smooth Paint falloff.
+**Spray** (Paint caves): a white ring of the spray size on the plane through the dab centre, perpendicular to the aimed
+surface normal (the plane the spray scatters in), so it follows slopes and walls; the dab sphere stays. Cost: one
+sphere draw plus 48 line segments per frame, about 0.01 ms (`prof` -> `brush.draw`).
+Smoke: `expect_brush_preview <outer> <inner> <spray>` (yd).
+
+## Map journal size and load time
+Every stroke rewrites `<project>/everwood/voxels/<MapDirectory>.mvoxj` (about 215 bytes per edit), and Noggit and
+the game replay the whole journal when the map loads. The panel line `Map edits: 12,345 (2.6 MB), loads in 1.6 s` shows
+the live edit count (undone strokes excluded), the file size and the time. The time is the measured read + replay
+of the last map open, scaled by the edits added since (`~` = an estimate); with no journal at open, 0.8 ms per edit.
+It turns amber, with a tooltip, from 2 s on (about 2500 edits): the map's edit history is large and loads slower in the
+editor and the game. Updated after every stroke, undo, redo and load.
+Measured (RelWithDebInfo, random brush-like dig / build / smooth / flatten dabs, radius 1-6, over 500 x 500 yd; read =
+file + JSON + wire decode, replay = every edit on the field + carve masks, meshes build later per frame):
+
+| edits | file | read | replay (reload in session) | replay at map open (cold ADT tiles) | per edit |
+|---|---|---|---|---|---|
+| 2,000 | 0.43 MB | 11 ms | 1.9 s | 3.0 s | 0.9-1.5 ms |
+| 10,000 | 2.1 MB | 94 ms | 7.8 s | 5.8 s | 0.6-0.8 ms |
+| 50,000 | 10.8 MB | 0.49 s | 20.7 s | 28 s | 0.4-0.6 ms |
+| 100,000 | 21.6 MB | 0.81 s | 31.2 s | 36 s | 0.3-0.4 ms |
+The read is under 3 %; the replay (ApplyEdit on freshly seeded chunks) is the cost, dearer per edit while the edits
+are spread out. Ramp dabs replay at about 0.25 ms. Smoke: `journal` (count, bytes, last load read / replay ms),
+`expect_journal_edits <n>`, `expect_journal_label normal|warn [text]`, `reload_journal`, `edits_batch <n> <seed> <cx>
+<cy> <span>` (one stroke of n pseudo-random edits, for measuring), `perf_begin` / `perf_end` (frames, fps, draw and
+brush draw cost between them).
+
 ## Remove floaters
 Tiny pieces of ground can end up floating (a thin ledge dug away from below, a build blob in the air); no brush
 stroke removes them without biting the ground next to them. **Remove floaters** (panel button, whole edited
@@ -81,8 +115,19 @@ replays: mode 6 (LEVEL, with a soft bank) along the path, optionally followed by
   strip with small dabs (radius Width / 2 within 2..6 yd) on an odd number of tracks across it, the centre line
   included; dabs are spaced 0.6-0.8 core radii. Where the ground is farther from the plane than a dab's vertical box
   (pos.z +- radius), the dab is stacked (same plane and xy, one per vertical slab) so a deep cut or fill is reached.
-- Limits: path 2..300 yd, at most 700 edits, width 1..32 yd, every radius <= 16 yd. A 20 yd ramp of width 6 is about
-  70-100 edits (a deep cut with Sharp banks needs more).
+- Limits: path 2..300 yd, width 1..32 yd, every radius <= 16 yd, and a **build budget**: at most 10000 edits and an
+  estimated apply time of about 3 s (0.1 ms per edit + 0.026 ms per 1000 voxels of the dabs' boxes, so Soft banks
+  with big dabs cost more per edit than Sharp ones). A path over the budget is refused with the edit count, the
+  estimated seconds and the advice to split it or narrow it. Measured on the lane-3 hillside (apply = planning +
+  all edits + one save; it was 4.6 ms per edit before the carve masks were flushed once per scripted stroke instead of
+  after every edit; undo 8.6 s -> 0.34 s for 5500 edits after the journal removal became one pass): 23 yd W4 Sharp
+  317 edits 70 ms; 50 yd W8 Normal 476 edits 120 ms; 150 yd W12 Sharp 1918 edits 0.3 s; 250 yd W32 Sharp 5503 edits
+  1.5 s; 300 yd W32 Sharp 7909 edits 2.0-3.6 s (the PC's load doubles it); 300 yd W32 Soft 3419 edits 2.7-4.5 s.
+  Undo 0.01-0.4 s, redo 0.1-1.7 s, 62 fps (the display's cap) before and after; the first frame after a 5500-edit ramp
+  builds the new meshes in about 0.45 s. From about 0.4 s of estimated time on the panel shows `Building ramp... N
+  edits` and the cursor turns to the wait cursor. No edits can be dropped without changing the surface: a dry
+  run showed only 2-4 % of the planned dabs change nothing, and the vertical stacks already cover only the ground
+  that needs them.
 - Measured with the smoke test (`expect_ramp_line`): surface within 0.17 yd of the requested line on a 14 degree
   ramp in a hillside, 0.12 yd on a 12 degree fixed-angle ramp, 0.07 yd on an 8 degree falling polyline.
 - Code: `EverwoodTool::rampEdits`, `drawRamp` (the live preview: centre line, flat edges, bank edges).
