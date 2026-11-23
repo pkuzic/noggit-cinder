@@ -102,6 +102,9 @@ namespace Noggit
       // void destroyFakeWorld() { if(_world) _world.reset(); _world = nullptr; _minimap_widget->world (nullptr); };
       void addNewMap();
 
+      // Automation hook (smoke harness): fill the new-map form like a user would and press Save.
+      void smokeCreateMap(std::string const& directory, std::string const& name, int area_table_id, int tile_x, int tile_z);
+
       World* getWorld() const;;
       std::unique_ptr<World> _world;
 
@@ -168,6 +171,8 @@ namespace Noggit
       WmoEntryTab _wmoEntryTab;
 
       bool _is_new_record = false;
+      // widget values right after selectMap(): an existing vanilla Map.dbc row only gets the columns the user changed
+      int _loaded_instance_type = 0, _loaded_area_table = 0, _loaded_loading_screen = 0, _loaded_max_players = 0;
       int _cur_map_id = -1;
 
       QMetaObject::Connection _connection;

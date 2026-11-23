@@ -1,5 +1,6 @@
 // This file is part of Noggit3, licensed under GNU General Public License (version 3).
 
+#include <limits>
 #include "MapCreationWizard.hpp"
 
 #include <noggit/application/Utils.hpp>
@@ -783,6 +784,11 @@ void MapCreationWizard::selectMap(int map_id)
 
   _max_players->setValue(std::atoi(maxPlayers.c_str()));
 
+  _loaded_instance_type = _instance_type->itemData(_instance_type->currentIndex()).toInt();
+  _loaded_area_table = _area_table_id->value();
+  _loaded_loading_screen = _loading_screen->value();
+  _loaded_max_players = _max_players->value();
+
   auto difficulty_table = ClientDatabase::getTable("MapDifficulty");
 
   auto iterator = difficulty_table.Records();
@@ -987,20 +993,36 @@ void MapCreationWizard::saveCurrentEntry()
       // would land past the record. Layout empirically verified, see MapDB::V_* in DBC.h.
       int const instance_type = _instance_type->itemData(_instance_type->currentIndex()).toInt();
 
-      record.writeString(MapDB::V_InternalName, _directory->text().toStdString());
-      record.write(MapDB::V_AreaType, instance_type);
-      record.write(MapDB::V_IsPvP, instance_type == 3 ? 1 : 0);
-      _map_name->toRecord(record, MapDB::V_Name);
-      record.write(MapDB::V_Name + 8, MapDB::V_LocaleMask);
-      record.write(MapDB::V_MaxPlayers, _max_players->value());
-      record.write(MapDB::V_UnkNeg1, -1);
-      record.write(MapDB::V_AreaTableID, _area_table_id->value());
-      _map_desc_horde->toRecord(record, MapDB::V_MapDescriptionHorde);
-      record.write(MapDB::V_MapDescriptionHorde + 8, MapDB::V_LocaleMask);
-      _map_desc_alliance->toRecord(record, MapDB::V_MapDescriptionAlliance);
-      record.write(MapDB::V_MapDescriptionAlliance + 8, MapDB::V_LocaleMask);
-      record.write(MapDB::V_LoadingScreen, _loading_screen->value());
-      record.write(MapDB::V_UnkFloat1, 1.0f);
+      // A NEW row gets every column. An EXISTING row (the form was filled by the DBD reader, which does not
+      // know every vanilla column) only gets what the user changed: rewriting the rest from the widgets
+      // zeroed e.g. the loading screen of Azeroth (4 -> 0).
+      bool const fresh = _is_new_record;
+      auto write_loc = [&](Noggit::Ui::Tools::MapCreationWizard::Ui::LocaleDBCEntry* entry, size_t field)
+      {
+        unsigned const old_mask = record.getUInt(field + DBCFile::LocaleCount);
+        entry->toRecord(record, field); // 8 locale columns, only changed slots rewritten
+        record.write(field + DBCFile::LocaleCount, fresh ? MapDB::V_LocaleMask : old_mask);
+      };
+      if (fresh)
+        record.writeString(MapDB::V_InternalName, _directory->text().toStdString());
+      if (fresh || instance_type != _loaded_instance_type)
+      {
+        record.write(MapDB::V_AreaType, instance_type);
+        record.write(MapDB::V_IsPvP, instance_type == 3 ? 1 : 0);
+      }
+      write_loc(_map_name, MapDB::V_Name);
+      if (fresh || _max_players->value() != _loaded_max_players)
+        record.write(MapDB::V_MaxPlayers, _max_players->value());
+      if (fresh)
+        record.write(MapDB::V_UnkNeg1, -1);
+      if (fresh || _area_table_id->value() != _loaded_area_table)
+        record.write(MapDB::V_AreaTableID, _area_table_id->value());
+      write_loc(_map_desc_horde, MapDB::V_MapDescriptionHorde);
+      write_loc(_map_desc_alliance, MapDB::V_MapDescriptionAlliance);
+      if (fresh || _loading_screen->value() != _loaded_loading_screen)
+        record.write(MapDB::V_LoadingScreen, _loading_screen->value());
+      if (fresh)
+        record.write(MapDB::V_UnkFloat1, 1.0f);
     }
     else
     {
@@ -1070,6 +1092,17 @@ MapCreationWizard::~MapCreationWizard()
   disconnect(_connection);
 }
 
+void MapCreationWizard::smokeCreateMap(std::string const& directory, std::string const& name, int area_table_id, int tile_x, int tile_z)
+{
+  addNewMap();
+  _directory->setText(QString::fromStdString(directory));
+  int const slot = DBCFile::localeSlot(Noggit::Application::NoggitApplication::instance()->clientData()->getLocaleId());
+  _map_name->setValue(name, slot);
+  _area_table_id->setValue(area_table_id);
+  _world->mapIndex.addTile(TileIndex(tile_x, tile_z));
+  saveCurrentEntry();
+}
+
 void MapCreationWizard::addNewMap()
 {
   _is_new_record = true;
@@ -1111,6 +1144,7 @@ void MapCreationWizard::addNewMap()
 
   _instance_type->setCurrentIndex(0);
 
+  _map_name->clear(); // no leftover translations of the map shown before
   _map_name->setDefaultLocValue("Unnamed Noggit Map");
   _area_table_id->setValue(0);
 
@@ -1188,6 +1222,8 @@ LocaleDBCEntry::LocaleDBCEntry(QWidget* parent) : QWidget(parent)
   _unk4 = new QLineEdit(this);
 
   _flags = new QSpinBox(this);
+  // default QSpinBox range is 0..99, which silently clamped every locale mask (e.g. 4128894 -> 99)
+  _flags->setRange(std::numeric_limits<int>::min(), std::numeric_limits<int>::max());
   _flags->setVisible(false);
 
   _show_entry->addWidget(_en);
@@ -1238,7 +1274,7 @@ LocaleDBCEntry::LocaleDBCEntry(QWidget* parent) : QWidget(parent)
 
   layout->addWidget(_current_locale);
 
-  int locale_id = Noggit::Application::NoggitApplication::instance()->clientData()->getLocaleId();
+  int locale_id = DBCFile::localeSlot(Noggit::Application::NoggitApplication::instance()->clientData()->getLocaleId());
   _current_locale->setCurrentIndex(locale_id);
   setCurrentLocale(_locale_names[locale_id]);
 
@@ -1265,7 +1301,7 @@ void Noggit::Ui::Tools::MapCreationWizard::Ui::LocaleDBCEntry::setValue(const st
 
   if (!val.empty() && _flags->value() == 0)
   {
-    _flags->setValue(16712190); // default flags when there is text
+    _flags->setValue(DBCFile::LocaleCount == 8 ? 4128894 : 16712190); // default flags when there is text
   }
 }
 
@@ -1274,14 +1310,17 @@ std::string Noggit::Ui::Tools::MapCreationWizard::Ui::LocaleDBCEntry::getValue(i
   return  _widget_map.at(_locale_names[locale])->text().toStdString();
 }
 
+// The widget always has 16 locale line edits (the WotLK layout), but the DBC only has
+// DBCFile::LocaleCount locale columns (8 on vanilla 1.12) followed by the flags/mask column.
+// Widgets past LocaleCount are not backed by the file: they are cleared on fill and never written.
 void LocaleDBCEntry::fill(DBCFile::Record& record, size_t field)
 {
   for (int loc = 0; loc < 16; ++loc)
   {
-    setValue(record.getLocalizedString(field, loc), loc);
+    setValue(loc < DBCFile::LocaleCount ? record.getLocalizedString(field, loc) : "", loc);
   }
 
-  _flags->setValue(record.getInt(field + 16));
+  _flags->setValue(record.getInt(field + DBCFile::LocaleCount));
 }
 
 void LocaleDBCEntry::fill(BlizzardDatabaseLib::Structures::BlizzardDatabaseRow& record, std::string columnName)
@@ -1307,19 +1346,23 @@ void LocaleDBCEntry::fill(BlizzardDatabaseLib::Structures::BlizzardDatabaseRow& 
 
 void LocaleDBCEntry::toRecord(DBCFile::Record &record, size_t field)
 {
-  for (int loc = 0; loc < 16; ++loc)
+  for (int loc = 0; loc < DBCFile::LocaleCount; ++loc)
   {
-    record.writeLocalizedString(field,getValue(loc), loc);
+    // leave an unchanged slot alone: rewriting it would append a duplicate string and move the offset
+    std::string const value = getValue(loc);
+    if (value == record.getLocalizedString(field, loc))
+      continue;
+    record.writeLocalizedString(field, value, loc);
   }
 
-  record.write(field + 16, _flags->value());
+  record.write(field + DBCFile::LocaleCount, _flags->value());
 }
 
 void LocaleDBCEntry::setDefaultLocValue(const std::string& text)
 {
   // set the default locale's widget text and select it, but don't write data.
 
-  int locale_id = Noggit::Application::NoggitApplication::instance()->clientData()->getLocaleId();
+  int locale_id = DBCFile::localeSlot(Noggit::Application::NoggitApplication::instance()->clientData()->getLocaleId());
   _current_locale->setCurrentIndex(locale_id);
   setCurrentLocale(_locale_names[locale_id]);
 

@@ -39,6 +39,7 @@ void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData)
   // Vanilla localized strings have 8 locale columns; TBC+ have 16. This drives
   // DBCFile::getLocalizedString and every hardcoded post-name column index.
   DBCFile::LocaleCount = is_vanilla ? 8 : 16;
+  AreaDB::setLayout(is_vanilla); // AreaTable columns after the Name block depend on the locale count
 
   // Open each DBC independently so one missing/corrupt file can't skip the rest, and skip
   // the tables that simply do not exist pre-TBC (LiquidType/LightParams/LightSkybox/
@@ -65,6 +66,12 @@ void OpenDBs(std::shared_ptr<BlizzardArchive::ClientData> clientData)
   };
 
   open_db(gAreaDB, "AreaTable.dbc");
+  if (gAreaDB.getFieldCount() != 0 && gAreaDB.getFieldCount() != AreaDB::ExpectedFieldCount)
+  {
+    LogError << "AreaTable.dbc has " << gAreaDB.getFieldCount() << " fields, expected "
+             << AreaDB::ExpectedFieldCount << " for this client version; the Area editor will read/write"
+             << " columns that do not exist (those accesses are refused)." << std::endl;
+  }
   open_db(gAreaTriggerDB, "AreaTrigger.dbc");
   open_db(gMapDB, "Map.dbc");
   open_db(gLoadingScreensDB, "LoadingScreens.dbc");

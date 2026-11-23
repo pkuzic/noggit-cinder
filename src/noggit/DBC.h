@@ -26,11 +26,34 @@ public:
   static const size_t ZoneIntroMusicTable = 9;    // uint 
   static const size_t ExplorationLevel = 10;    // int
   static const size_t Name = 11;    // localisation string
-  static const size_t FactionGroup = 28;    // uint
-  static const size_t LiquidType = 29;    // uint[4]
-  static const size_t MinElevation = 33;    // float
-  static const size_t AmbientMultiplier = 34;    // float
-  static const size_t LightId = 35;    // int
+  // Everything after the localized Name block depends on the client version: WotLK has 16 locale
+  // columns + flags (Name 11..26, mask 27), vanilla 1.12 has 8 + flags (Name 11..18, mask 19) and a
+  // single LiquidType column. These are runtime values set by setLayout() from OpenDBs(); the
+  // defaults are the WotLK layout (unchanged behaviour). Never index past a name block with a
+  // hard-coded 16: use NameMask / FactionGroup / ... so both versions get the right column.
+  //   WotLK : FactionGroup 28, LiquidType 29..32, MinElevation 33, AmbientMultiplier 34, LightId 35 (36 fields)
+  //   1.12  : FactionGroup 20, LiquidType 21,     MinElevation 22, AmbientMultiplier 23, LightId 24 (25 fields)
+  static inline size_t NameMask = 27;            // locale flags/mask column
+  static inline size_t FactionGroup = 28;        // uint
+  static inline size_t LiquidType = 29;          // uint[4] (WotLK) / uint (1.12)
+  static inline size_t MinElevation = 33;        // float
+  static inline size_t AmbientMultiplier = 34;   // float
+  static inline size_t LightId = 35;             // int
+  static inline size_t ExpectedFieldCount = 36;
+  static inline bool Vanilla = false;            // 1.12 layout in use
+
+  static void setLayout(bool vanilla)
+  {
+    Vanilla = vanilla;
+    size_t const locales = vanilla ? 8 : 16;
+    NameMask = Name + locales;
+    FactionGroup = NameMask + 1;
+    LiquidType = FactionGroup + 1;
+    MinElevation = LiquidType + (vanilla ? 1 : 4);
+    AmbientMultiplier = MinElevation + 1;
+    LightId = AmbientMultiplier + 1;
+    ExpectedFieldCount = LightId + 1;
+  }
 
   static std::string getAreaFullName(int pAreaID);
   static std::uint32_t get_area_parent(int area_id);

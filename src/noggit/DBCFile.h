@@ -32,6 +32,11 @@ public:
   // Set once by OpenDBs() from the project version; defaults to the WotLK layout.
   static int LocaleCount;
 
+  // DBC locale column for the client's locale id (ClientData::getLocaleId(), WotLK numbering).
+  // On vanilla (8 columns) a WotLK id past the table has no column: ruRU (8) is the Turtle/Everwood
+  // convention of reusing slot 5, anything else falls back to enUS (0). Never returns >= LocaleCount.
+  static int localeSlot(int client_locale_id);
+
   class NotFound : public std::runtime_error
   {
   public:
@@ -64,13 +69,19 @@ public:
     void write(size_t field, T val)
     {
       static_assert(sizeof(T) == 4, "This function only writes int/uint/float values.");
-      assert(field < file.fieldCount);
+      // asserts are compiled out in release: a wrong column must never write into a neighbour row
+      if (!checkField(field, "write"))
+        return;
       *reinterpret_cast<T*>(offset + field * 4) = val;
     }
 
     void writeString(size_t field, const std::string& val);
 
     void writeLocalizedString(size_t field, const std::string& val, unsigned int locale);
+
+    // True when `field` is a column of this record. Otherwise logs once per (file, field, op) and
+    // returns false: reads then return 0/"" and writes are refused.
+    bool checkField(size_t field, char const* op) const;
 
   private:
     Record(DBCFile &pfile, unsigned char *poffset) : file(pfile), offset(poffset) {}

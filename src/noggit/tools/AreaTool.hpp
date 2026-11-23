@@ -41,6 +41,8 @@ namespace Noggit
 
         void onMousePress(MousePressParameters const& params) override;
 
+        Ui::zone_id_browser* zoneBrowser() { return _areaTool; }
+
     private:
         Ui::zone_id_browser* _areaTool = nullptr;
         int _selectedAreaId = -1;

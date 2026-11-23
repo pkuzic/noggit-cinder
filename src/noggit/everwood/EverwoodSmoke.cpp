@@ -3,6 +3,10 @@
 #include <noggit/everwood/EverwoodSmoke.hpp>
 
 #include <noggit/Action.hpp>
+#include <noggit/DBC.h>
+#include <noggit/tools/AreaTool.hpp>
+#include <noggit/ui/ZoneIDBrowser.h>
+#include <noggit/ui/tools/MapCreationWizard/Ui/MapCreationWizard.hpp>
 #include <noggit/ActionManager.hpp>
 #include <noggit/WMOInstance.h>
 #include <noggit/everwood/EverwoodLayer.hpp>
@@ -339,6 +343,9 @@ namespace Noggit::Everwood
       else if (runEverwood(cmd, a, line))
       {
       }
+      else if (runZone(cmd, a, line))
+      {
+      }
       else
       {
         report("FAIL unknown command " + cmd.toStdString());
@@ -431,6 +438,189 @@ namespace Noggit::Everwood
       char buf[32];
       std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(requireTool()->layer()->paintHash()));
       return buf;
+    }
+
+
+    // ---- zone editor / map wizard automation (drives the same functions the buttons call) ----
+    Noggit::AreaTool* areaTool()
+    {
+      if (!_view)
+        return nullptr;
+      for (auto& tool : _view->_tools)
+        if (tool && tool->editingMode() == editing_mode::areaid)
+          return static_cast<Noggit::AreaTool*>(tool.get());
+      return nullptr;
+    }
+
+    Noggit::Ui::zone_id_browser* zoneBrowser()
+    {
+      auto* t = areaTool();
+      if (!t || !t->zoneBrowser())
+      {
+        report("FAIL no Area tool in this map view");
+        finish(8);
+      }
+      return t->zoneBrowser();
+    }
+
+    static size_t areaColumn(QString const& n, bool& ok)
+    {
+      ok = true;
+      if (n == "id") return AreaDB::AreaID;
+      if (n == "map") return AreaDB::Continent;
+      if (n == "parent") return AreaDB::Region;
+      if (n == "areabit") return AreaDB::AreaBit;
+      if (n == "flags") return AreaDB::Flags;
+      if (n == "sp") return AreaDB::SoundProviderPreferences;
+      if (n == "usp") return AreaDB::UnderwaterSoundProviderPreferences;
+      if (n == "ambience") return AreaDB::SoundAmbience;
+      if (n == "music") return AreaDB::ZoneMusic;
+      if (n == "intro") return AreaDB::ZoneIntroMusicTable;
+      if (n == "exploration") return AreaDB::ExplorationLevel;
+      if (n == "mask") return AreaDB::NameMask;
+      if (n == "faction") return AreaDB::FactionGroup;
+      if (n == "minelev") return AreaDB::MinElevation;
+      if (n == "ambient") return AreaDB::AmbientMultiplier;
+      if (n == "light") return AreaDB::LightId;
+      bool num = false;
+      size_t const v = n.toULongLong(&num);
+      ok = num;
+      return v;
+    }
+
+    std::string fileHashText(QString const& rel)
+    {
+      QFile f(QString::fromStdString(_project->ProjectPath) + "/" + rel);
+      if (!f.open(QIODevice::ReadOnly))
+        return "missing";
+      QByteArray const d = f.readAll();
+      unsigned long long h = 1469598103934665603ull;
+      for (unsigned char c : d) { h ^= c; h *= 1099511628211ull; }
+      char buf[64];
+      std::snprintf(buf, sizeof(buf), "%016llx size=%lld", h, static_cast<long long>(d.size()));
+      return buf;
+    }
+
+    bool compareCell(DBCFile::Record& rec, size_t col, QString const& want)
+    {
+      if (want.contains('.'))
+        return std::fabs(rec.getFloat(col) - want.toFloat()) < 1e-4f;
+      return rec.getUInt(col) == static_cast<unsigned>(want.toLongLong());
+    }
+
+    bool runZone(QString const& cmd, QStringList const& a, QString const& line)
+    {
+      auto rest = [&](int from) { QStringList r = a.mid(from); return r.join(' '); };
+      if (cmd == "zone_tool")
+      {
+        _view->set_editing_mode(editing_mode::areaid);
+        report(std::string("active tool: ") + _view->activeTool()->name());
+      }
+      else if (cmd == "zone_create")
+      {
+        // zone_create <name...>  (id = first free, like the dialog default)
+        int const id = gAreaDB.getEmptyRecordID();
+        int const got = zoneBrowser()->create_zone(id, rest(1).toStdString());
+        _last_area = got;
+        report("created zone " + std::to_string(got));
+        expect(got == id, "zone_create");
+      }
+      else if (cmd == "subzone_create")
+      {
+        // subzone_create <parentId|last> <name...>
+        int const id = gAreaDB.getEmptyRecordID();
+        int const parent = a.value(1) == "last" ? _last_area : a.value(1).toInt();
+        int const got = zoneBrowser()->create_subzone(parent, id, rest(2).toStdString());
+        _last_area = got;
+        report("created subzone " + std::to_string(got));
+        expect(got == id, "subzone_create");
+      }
+      else if (cmd == "zone_open")
+      {
+        int const id = a.value(1) == "last" ? _last_area : a.value(1).toInt();
+        zoneBrowser()->select_area(id);
+        zoneBrowser()->open_area_editor();
+        report("opened area " + std::to_string(id));
+      }
+      else if (cmd == "zone_set")
+      {
+        expect(zoneBrowser()->area_editor()->set_value(a.value(1).toStdString(), a.value(2).toDouble()), "zone_set " + a.value(1).toStdString());
+      }
+      else if (cmd == "zone_set_name")
+      {
+        zoneBrowser()->area_editor()->set_name(rest(2).toStdString(), a.value(1).toInt());
+      }
+      else if (cmd == "zone_save")
+      {
+        zoneBrowser()->area_editor()->save_area();
+        report("zone saved");
+      }
+      else if (cmd == "area_save_raw")
+      {
+        gAreaDB.save();
+        report("AreaTable.dbc written unchanged (" + std::to_string(gAreaDB.getRecordCount()) + " rows, " + std::to_string(gAreaDB.getFieldCount()) + " fields)");
+      }
+      else if (cmd == "map_save_raw")
+      {
+        gMapDB.save();
+        report("Map.dbc written unchanged (" + std::to_string(gMapDB.getRecordCount()) + " rows, " + std::to_string(gMapDB.getFieldCount()) + " fields)");
+      }
+      else if (cmd == "area_dbc_hash")
+      {
+        report("AreaTable.dbc " + fileHashText("DBFilesClient/AreaTable.dbc"));
+      }
+      else if (cmd == "map_dbc_hash")
+      {
+        report("Map.dbc " + fileHashText("DBFilesClient/Map.dbc"));
+      }
+      else if (cmd == "expect_area")
+      {
+        // expect_area <id|last> <field name|column> <value>   or   expect_area <id|last> name <slot> <text>
+        int const id = a.value(1) == "last" ? _last_area : a.value(1).toInt();
+        try
+        {
+          auto rec = gAreaDB.getByID(id);
+          if (a.value(2) == "name")
+          {
+            std::string const got = rec.getLocalizedString(AreaDB::Name, a.value(3).toInt());
+            std::string const want = rest(4).toStdString();
+            expect(got == want, "area " + std::to_string(id) + " name[" + a.value(3).toStdString() + "] = [" + got + "] (want [" + want + "])");
+          }
+          else
+          {
+            bool ok = false;
+            size_t const col = areaColumn(a.value(2), ok);
+            expect(ok && compareCell(rec, col, a.value(3)), "area " + std::to_string(id) + " " + a.value(2).toStdString() + " (col " + std::to_string(col) + ") = " + a.value(3).toStdString()
+                   + " (got u32 " + std::to_string(rec.getUInt(col)) + ")");
+          }
+        }
+        catch (DBCFile::NotFound const&) { expect(false, "area " + std::to_string(id) + " exists"); }
+      }
+      else if (cmd == "expect_area_rows")
+      {
+        expect(static_cast<int>(gAreaDB.getRecordCount()) == a.value(1).toInt(), "AreaTable rows = " + a.value(1).toStdString() + " (got " + std::to_string(gAreaDB.getRecordCount()) + ")");
+        expect(static_cast<int>(gAreaDB.getFieldCount()) == a.value(2).toInt(), "AreaTable fields = " + a.value(2).toStdString() + " (got " + std::to_string(gAreaDB.getFieldCount()) + ")");
+      }
+      else if (cmd == "map_create")
+      {
+        // map_create <directory> <area_table_id> <tile_x> <tile_z> <name...>
+        _window->_map_creation_wizard->smokeCreateMap(a.value(1).toStdString(), rest(5).toStdString(), a.value(2).toInt(), a.value(3).toInt(), a.value(4).toInt());
+        report("map created, Map.dbc rows " + std::to_string(gMapDB.getRecordCount()));
+      }
+      else if (cmd == "expect_map")
+      {
+        // expect_map <id> <column> <value>
+        try
+        {
+          auto rec = gMapDB.getByID(a.value(1).toInt());
+          size_t const col = a.value(2).toULongLong();
+          expect(compareCell(rec, col, a.value(3)), "map " + a.value(1).toStdString() + " col " + a.value(2).toStdString() + " = " + a.value(3).toStdString() + " (got u32 " + std::to_string(rec.getUInt(col)) + ")");
+        }
+        catch (DBCFile::NotFound const&) { expect(false, "map exists"); }
+      }
+      else
+        return false;
+      return true;
     }
 
     bool runEverwood(QString const& cmd, QStringList const& a, QString const& line)
@@ -1317,6 +1507,7 @@ namespace Noggit::Everwood
     Noggit::Ui::Windows::NoggitWindow* _window = nullptr;
     MapView* _view = nullptr;
     int _map_id = 0;
+    int _last_area = 0;
     Qt::MouseButtons _held = Qt::NoButton;
     std::size_t _realPresses = 0;
     std::size_t _realOther = 0;

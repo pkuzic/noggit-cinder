@@ -10,6 +10,8 @@
 
 #include <cstring>
 #include <fstream>
+#include <mutex>
+#include <set>
 #include <string>
 
 
@@ -21,6 +23,15 @@ auto write(std::ostream& stream, T const& val) -> void
 
 // Defaults to the WotLK/TBC 16-locale layout; OpenDBs() lowers it to 8 for vanilla.
 int DBCFile::LocaleCount = 16;
+
+int DBCFile::localeSlot(int client_locale_id)
+{
+  if (client_locale_id >= 0 && client_locale_id < LocaleCount)
+    return client_locale_id;
+  if (LocaleCount == 8 && client_locale_id == 8)
+    return 5;
+  return 0;
+}
 
 DBCFile::DBCFile(const std::string& _filename)
   : filename(_filename)
@@ -129,6 +140,8 @@ DBCFile DBCFile::createNew(std::string filename, std::uint32_t fieldCount, std::
 
 DBCFile::Record DBCFile::getRecord(size_t id)
 {
+  if (id >= recordCount)
+    throw NotFound(); // row index past the table (also: table not loaded)
   return Record(*this, data.data() + id * recordSize);
 }
 
@@ -196,6 +209,8 @@ DBCFile::Record DBCFile::addRecord(size_t id, size_t id_field)
 {
   assert(recordSize > 0);
   assert(id_field < fieldCount);
+  if (recordSize == 0 || id_field >= fieldCount)
+    throw NotFound(); // table not loaded / wrong id column: nothing to append to
 
   for (Iterator i = begin(); i != end(); ++i)
   {
@@ -214,8 +229,6 @@ DBCFile::Record DBCFile::addRecord(size_t id, size_t id_field)
 
 DBCFile::Record DBCFile::addRecordCopy(size_t id, size_t id_from, size_t id_field)
 {
-  recordCount++;
-
   bool from_found = false;
   size_t from_idx = 0;
 
@@ -239,6 +252,8 @@ DBCFile::Record DBCFile::addRecordCopy(size_t id, size_t id_from, size_t id_fiel
   {
     throw NotFound();
   }
+
+  recordCount++; // only once the copy is certain (an early throw used to leave the count off by one)
 
   size_t old_size = data.size();
   data.resize(old_size + recordSize);
@@ -313,29 +328,59 @@ int DBCFile::getEmptyRecordID(size_t id_field)
   return static_cast<int>(++id);
 }
 
+namespace
+{
+  const float zero_float = 0.f;
+  const unsigned int zero_uint = 0u;
+  const int zero_int = 0;
+}
+
+bool DBCFile::Record::checkField(size_t field, char const* op) const
+{
+  if (field < file.fieldCount && offset)
+    return true;
+
+  static std::mutex reported_mutex; // async loaders read DBCs too
+  static std::set<std::string> reported;
+  std::string const key = file.filename + ":" + std::to_string(field) + ":" + op;
+  std::lock_guard<std::mutex> lock(reported_mutex);
+  if (reported.insert(key).second)
+  {
+    LogError << "DBC \"" << file.filename << "\": " << op << " of field " << field
+             << " refused (record has " << file.fieldCount << " fields). A hard-coded column does not"
+             << " match this client's DBC layout." << std::endl;
+  }
+  return false;
+}
+
 const float& DBCFile::Record::getFloat(size_t field) const
 {
-    assert(field < file.fieldCount);
+    if (!checkField(field, "read"))
+      return zero_float;
     return *reinterpret_cast<float*>(offset + field * 4);
 }
 
 const unsigned int& DBCFile::Record::getUInt(size_t field) const
 {
-  assert(field < file.fieldCount);
+  if (!checkField(field, "read"))
+    return zero_uint;
   return *reinterpret_cast<unsigned int*>(offset + field * 4);
 }
 
 const int& DBCFile::Record::getInt(size_t field) const
 {
-  assert(field < file.fieldCount);
+  if (!checkField(field, "read"))
+    return zero_int;
   return *reinterpret_cast<int*>(offset + field * 4);
 }
 
 const char* DBCFile::Record::getString(size_t field) const
 {
-  assert(field < file.fieldCount);
+  if (!checkField(field, "read"))
+    return "";
   size_t stringOffset = getUInt(field);
-  assert(stringOffset < file.stringSize);
+  if (stringOffset >= file.stringTable.size())
+    return "";
   return file.stringTable.data() + stringOffset;
 }
 
@@ -354,17 +399,22 @@ const char* DBCFile::Record::getLocalizedString(size_t field, int locale) const
       if (stringOffset != 0)
         break;
     }
+    if (loc >= DBCFile::LocaleCount)
+      loc = 0; // nothing populated: the first (empty) slot
   }
 
-  assert(field + loc < file.fieldCount);
+  if (loc < 0 || !checkField(field + loc, "read"))
+    return "";
   size_t stringOffset = getUInt(field + loc);
-  assert(stringOffset < file.stringSize);
+  if (stringOffset >= file.stringTable.size())
+    return "";
   return file.stringTable.data() + stringOffset;
 }
 
 void DBCFile::Record::writeString(size_t field, const std::string& val)
 {
-  assert(field < file.fieldCount);
+  if (!checkField(field, "write"))
+    return;
 
   if (!val.size())
   {
@@ -381,8 +431,13 @@ void DBCFile::Record::writeString(size_t field, const std::string& val)
 
 void DBCFile::Record::writeLocalizedString(size_t field, const std::string& val, unsigned int locale)
 {
-  assert(field < file.fieldCount);
-  assert(locale < DBCFile::LocaleCount);
+  if (static_cast<int>(locale) >= DBCFile::LocaleCount)
+  {
+    // e.g. a 16-slot widget on a vanilla (8-locale) file: those slots do not exist in the DBC
+    return;
+  }
+  if (!checkField(field + locale, "write"))
+    return;
 
   if (!val.size())
   {

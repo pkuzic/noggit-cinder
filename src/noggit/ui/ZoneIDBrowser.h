@@ -71,6 +71,13 @@ namespace Noggit
         AreaEditor(QWidget* parent = nullptr);
 
         void load_area(int area_id);
+        void save_area();
+
+        // Test/automation hooks (the smoke harness drives the same widgets the user does).
+        // name: flags, exploration, faction (0..3 = combobox index), min_elevation, ambient (0..100),
+        //       zone_music, intro_music, sound_provider, underwater_provider (DBC ids), areabit is read-only.
+        bool set_value(std::string const& name, double value);
+        void set_name(std::string const& text, int locale_slot);
     private:
         QLabel* _area_id_label;
         QLabel* _parent_area_label;
@@ -95,9 +102,19 @@ namespace Noggit
         QPushButton* _sound_ambiance_day_button;
         QPushButton* _sound_ambiance_night_button;
 
-        void save_area();
-
         int _areabit = 0;
+
+        // What the widgets say. load_area() stores one after filling them; save_area() only writes the
+        // columns whose widget differs from it, so opening + saving an area never rewrites (and so never
+        // loses) a value the editor cannot represent (an unknown music id, a LightId, a clamped float...).
+        struct Snapshot
+        {
+          int parent = 0, flags = 0, exploration = 0, faction = 0, ambient = 0;
+          int sound_provider = 0, underwater_provider = 0, music = 0, intro = 0, amb_day = 0, amb_night = 0;
+          double min_elevation = 0.0;
+        };
+        Snapshot snapshot() const;
+        Snapshot _loaded;
     };
 
     class zone_id_browser : public QWidget
@@ -117,6 +134,14 @@ namespace Noggit
       void buildAreaList();
       QTreeWidgetItem* create_or_get_tree_widget_item(int area_id);
 
+      // The non-interactive halves of "Add zone" / "Add subzone": create the AreaTable row, save the
+      // DBC, add + select it in the tree and open the editor. Return the new area id (0 on failure).
+      int create_zone(int new_id, std::string const& name);
+      int create_subzone(int parent_area_id, int new_id, std::string const& name);
+      void select_area(int area_id);
+      void open_area_editor();
+      AreaEditor* area_editor() { return _area_editor; }
+
     signals:
       void selected (int area_id);
 
@@ -135,7 +160,6 @@ namespace Noggit
       float _radius = 15.0f;
 
       QTreeWidgetItem* add_area(int area_id);
-      void open_area_editor();
       void add_new_zone();
       void add_new_subzone();
     };
