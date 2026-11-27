@@ -1,0 +1,14 @@
+{
+  "id": "hello_mod",
+  "name": "Hello Mod",
+  "version": "1.0.0",
+  "author": "Noggit Cinder",
+  "description": "Sample mod: places a stock WMO at the cursor and writes a text file into the project.",
+  "noggit_api": 1,
+  "entry": "main.lua",
+  "permissions": {
+    "menu": true,
+    "project_write_binary": true,
+    "hooks": ["save", "map_open"]
+  }
+}

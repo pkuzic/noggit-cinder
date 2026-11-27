@@ -61,6 +61,7 @@
 #include <sstream>
 
 #include "revision.h"
+#include <noggit/mods/ModManager.hpp>
 
 #include "ui_TitleBar.h"
 #include <noggit/ui/tools/ViewportManager/ViewportManager.hpp>
@@ -206,6 +207,12 @@ namespace Noggit::Ui::Windows
                        close();
                      }
     );
+
+    // Noggit Mods: drop-in mods from <exe dir>/mods/<name>/mod.json (docs/MODS.md).
+    // Loads once per run (asks for each new mod's permissions); a failing mod never stops Noggit.
+    Noggit::Mods::ModManager::instance().setProjectPath(_project->ProjectPath);
+    Noggit::Mods::ModManager::instance().ensureLoaded(this);
+    Noggit::Mods::ModManager::instance().attachMenuBar(_menuBar, this);
 
     _menuBar->adjustSize();
 
@@ -749,6 +756,9 @@ namespace Noggit::Ui::Windows
 
   void NoggitWindow::patchWowClient()
   {
+      // Noggit Mods: on_export hooks run first, so mods can write their files into the project before it is packed.
+      Noggit::Mods::ModManager::instance().fireHook("export");
+
       // Option to make folder patch ?
 
       QDialog* mpq_patch_params = new QDialog(this);

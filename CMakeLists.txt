@@ -430,6 +430,12 @@ COMMAND ${CMAKE_COMMAND} -E copy_directory
     "$<TARGET_FILE_DIR:noggit>"
 )
 
+#add the open sample mods (Noggit Mods, docs/MODS.md); user mods in bin/mods are left alone
+add_custom_command(TARGET noggit POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${PROJECT_SOURCE_DIR}/mods"
+        $<TARGET_FILE_DIR:noggit>/mods)
+
 #add distribution themes
 add_custom_command(TARGET noggit POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory

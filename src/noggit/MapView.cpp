@@ -22,6 +22,7 @@
 #include <noggit/ui/ObjectEditor.h>
 #include <noggit/ui/RotationEditor.h>
 #include <noggit/Compat112Check.hpp>
+#include <noggit/mods/ModManager.hpp>
 #include <noggit/ui/Compat112Window.hpp>
 #include <noggit/ui/TexturePicker.h>
 #include <noggit/ui/TexturingGUI.h>
@@ -2533,6 +2534,10 @@ void MapView::createGUI()
       tool->postUiSetup();
   }
 
+  // Noggit Mods: give mods this map view (cursor read through a getter; _cursor_pos stays private).
+  Noggit::Mods::ModManager::instance().attachMapView(this, [this] { return _cursor_pos; });
+  QTimer::singleShot(0, this, [] { Noggit::Mods::ModManager::instance().fireHook("map_open"); });
+
   connect(_main_window, &Noggit::Ui::Windows::NoggitWindow::exitPromptOpened, this, &MapView::on_exit_prompt);
 
   set_editing_mode (editing_mode::ground);
@@ -3028,6 +3033,7 @@ void MapView::resizeGL (int width, int height)
 
 MapView::~MapView()
 {
+  Noggit::Mods::ModManager::instance().detachMapView(this);
   makeCurrent();
 
   bool const has_current_context = context()
@@ -4390,6 +4396,12 @@ void MapView::save(save_mode mode)
 
     _main_window->statusBar()->showMessage("Map saved", 2000);
 
+  }
+
+  if (save)
+  {
+    // Noggit Mods: on_save hooks, after the tiles are written (outside the GL scope above).
+    Noggit::Mods::ModManager::instance().fireHook("save");
   }
   else
   {

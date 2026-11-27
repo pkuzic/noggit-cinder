@@ -279,6 +279,10 @@ Remove floaters / Ramp: `set floaters 0|1` (Smooth checkbox), `set floater_max <
 x1 y1 z1 tol [skip]`.
 `seed_journal <file> [MapDirectory]` (before `map`; default `Azeroth`) makes the project's `.mvoxj` a copy of
 `<file>`, so a script can start from the edits a previous session left behind.
+Noggit Mods (`docs/MODS.md`): `modal <png> <button>` (arm before the step that opens a dialog: the next modal dialog
+is saved to `<png>`, its text reported and `<button>` clicked - e.g. the mod permission prompt before `project`),
+`mods_menu <png prefix>` (main window + Mods menu + each mod's sub-menu, grabbed off-screen),
+`mod_action <id> <label>`, `mod_report <id>` (state + log), `expect_file <path>`.
 
 Only the script drives the window: real mouse, wheel, key, tablet and touch input from the desktop is ignored
 during a smoke run (a click on that screen would otherwise start a stroke between the scripted ones and shift every

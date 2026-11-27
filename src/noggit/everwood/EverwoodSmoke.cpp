@@ -20,6 +20,7 @@
 #include <noggit/application/NoggitApplication.hpp>
 #include <noggit/application/Configuration/NoggitApplicationConfiguration.hpp>
 #include <noggit/Log.h>
+#include <noggit/mods/ModManager.hpp>
 #include <noggit/MapHeaders.h>
 #include <noggit/MapView.h>
 #include <noggit/World.h>
@@ -46,9 +47,14 @@
 #include <QtGui/QImage>
 #include <QtGui/QMouseEvent>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QAbstractButton>
+#include <QtCore/QPointer>
+#include <QtWidgets/QMenu>
+#include <QtWidgets/QMessageBox>
 namespace Noggit::Everwood { std::string profileText(bool reset); bool profileGet(char const* name, long& n, double& ms); }
 #include <QtWidgets/QDialog>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -339,6 +345,44 @@ namespace Noggit::Everwood
       else if (cmd == "exit")
       {
         finish(0);
+      }
+      else if (cmd == "modal")
+      {
+        // modal <png> <button text>: the next modal dialog (e.g. a Noggit Mods permission prompt) is
+        // saved to <png>, its text reported, and the named button clicked. Arm it BEFORE the step that opens it.
+        _modals.push_back({ a.value(1), line.section(' ', 2).trimmed() });
+        armModalWatcher();
+      }
+      else if (cmd == "mods_menu")
+      {
+        // mods_menu <png prefix>: the main window, the Mods menu and each mod's sub-menu, grabbed off-screen
+        modsMenuShot(a.value(1));
+      }
+      else if (cmd == "mod_action")
+      {
+        // mod_action <mod id> <menu label>: runs it as a click would
+        QString const id = a.value(1);
+        QString const label = line.section(' ', 2).trimmed();
+        expect(Noggit::Mods::ModManager::instance().triggerAction(id.toStdString(), label.toStdString())
+          , "mod_action " + id.toStdString() + " '" + label.toStdString() + "'");
+      }
+      else if (cmd == "mod_report")
+      {
+        // mod_report <mod id>: state + log lines of one mod into the result file
+        auto* mod = Noggit::Mods::ModManager::instance().find(a.value(1).toStdString());
+        if (!mod)
+        {
+          expect(false, "mod " + a.value(1).toStdString() + " exists");
+          return;
+        }
+        report("mod " + mod->manifest.id + " state " + std::to_string(int(mod->state)) + " actions " + std::to_string(mod->actions.size())
+          + (mod->error.empty() ? "" : " last error: " + mod->error));
+        for (auto const& l : mod->log)
+          report("  log: " + l);
+      }
+      else if (cmd == "expect_file")
+      {
+        expect(QFile::exists(line.mid(cmd.size() + 1).trimmed()), "file exists " + line.mid(cmd.size() + 1).trimmed().toStdString());
       }
       else if (runEverwood(cmd, a, line))
       {
@@ -1482,6 +1526,79 @@ namespace Noggit::Everwood
       return true;
     }
 
+    struct PendingModal { QString png; QString button; };
+
+    void armModalWatcher()
+    {
+      if (_modal_timer)
+        return;
+      _modal_timer = new QTimer(this);
+      connect(_modal_timer, &QTimer::timeout, this, [this]
+      {
+        if (_modals.empty())
+          return;
+        QWidget* w = QApplication::activeModalWidget();
+        if (!w || !w->isVisible() || w == _last_modal)
+          return;
+        _last_modal = w;
+        PendingModal const pending = _modals.front();
+        _modals.erase(_modals.begin());
+        std::string text = w->windowTitle().toStdString();
+        if (auto* box = qobject_cast<QMessageBox*>(w))
+          text += " | " + box->text().toStdString() + " | " + box->informativeText().toStdString();
+        std::replace(text.begin(), text.end(), '\n', ' ');
+        bool const saved = w->grab().save(pending.png);
+        report(std::string(saved ? "modal shot " : "FAIL modal shot not written ") + pending.png.toStdString() + " : " + text);
+        QAbstractButton* hit = nullptr;
+        for (auto* b : w->findChildren<QAbstractButton*>())
+          if (QString(b->text()).remove('&') == pending.button)
+            hit = b;
+        if (hit)
+        {
+          report("modal click '" + pending.button.toStdString() + "'");
+          hit->click();
+        }
+        else
+        {
+          report("FAIL modal has no button '" + pending.button.toStdString() + "', closing it");
+          _failed = true;
+          w->close();
+        }
+      });
+      _modal_timer->start(150);
+    }
+
+    void modsMenuShot(QString const& prefix)
+    {
+      QMenu* menu = Noggit::Mods::ModManager::instance().menu();
+      if (!menu || !_window)
+      {
+        expect(false, "Mods menu exists");
+        return;
+      }
+      _window->grab().save(prefix + "_window.png");
+      menu->aboutToShow();  // fills it, as opening it would (no popup: nothing grabs the desktop's mouse)
+      menu->adjustSize();
+      expect(menu->grab().save(prefix + "_menu.png"), "Mods menu shot " + prefix.toStdString() + "_menu.png");
+      int n = 0;
+      for (QAction* act : menu->actions())
+      {
+        std::string entries;
+        if (QMenu* sub = act->menu())
+        {
+          sub->adjustSize();
+          QString const file = prefix + "_sub" + QString::number(n++) + ".png";
+          sub->grab().save(file);
+          for (QAction* s2 : sub->actions())
+            if (!s2->isSeparator())
+              entries += " [" + s2->text().toStdString() + "]";
+          report("menu " + act->text().toStdString() + " ->" + entries + " (" + file.toStdString() + ")");
+        }
+        else if (!act->isSeparator())
+          report("menu " + act->text().toStdString());
+      }
+    }
+
     void shot(QString const& path)
     {
       _view->_needs_redraw = true;
@@ -1502,6 +1619,9 @@ namespace Noggit::Everwood
     QTimer _timer;
     bool _busy = false;
     bool _failed = false;
+    std::vector<PendingModal> _modals;
+    QTimer* _modal_timer = nullptr;
+    QPointer<QWidget> _last_modal;
 
     std::shared_ptr<Noggit::Project::NoggitProject> _project;
     Noggit::Ui::Windows::NoggitWindow* _window = nullptr;
