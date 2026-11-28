@@ -14,6 +14,11 @@ mod.add_menu_action("Place a stock WMO at the cursor", function()
     if not path then return end
   end
   local pos = mod.cursor_pos()
+  -- No terrain under the cursor gives (0, 0, 0): refuse instead of placing at the map origin.
+  if pos.x == 0 and pos.y == 0 and pos.z == 0 then
+    mod.message("Point the cursor at the terrain first.")
+    return
+  end
   local uid = mod.add_wmo(path, pos, { scale = 1.0, rot = { x = 0, y = 0, z = 0 } })
   mod.log("placed " .. path .. " uid " .. uid .. " at " .. util.fmt_vec(pos))
   mod.message("Placed " .. path .. "\nuid " .. uid .. " at " .. util.fmt_vec(pos) .. "\n(Ctrl+Z undoes it)")
