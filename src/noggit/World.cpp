@@ -2552,12 +2552,13 @@ WMOInstance* World::addWMOAndGetInstance ( BlizzardArchive::Listfile::FileKey co
     , math::degrees::vec3 rotation
     , float scale
     , bool action
+    , std::optional<std::uint32_t> fixed_uid
 )
 {
   ZoneScoped;
   WMOInstance wmo_instance(file_key, _context);
 
-  wmo_instance.uid = mapIndex.newGUID();
+  wmo_instance.uid = fixed_uid ? *fixed_uid : mapIndex.newGUID();
   wmo_instance.pos = newPos;
   wmo_instance.dir = rotation;
   // EVERWOOD: keep the requested scale (undo of a delete, paste, replace); a new placement passes 1.0.

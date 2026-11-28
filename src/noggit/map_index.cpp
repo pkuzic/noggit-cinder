@@ -10,6 +10,7 @@
 #include <noggit/Action.hpp>
 #include <noggit/project/CurrentProject.hpp>
 #include <noggit/map_index.hpp>
+#include <noggit/mods/ReservedUid.hpp>
 #include <noggit/uid_storage.hpp>
 #include <noggit/application/NoggitApplication.hpp>
 #include <ClientFile.hpp>
@@ -743,7 +744,8 @@ uint32_t MapIndex::getHighestGUIDFromFile(const std::string& pFilename) const
     ENTRY_MDDF const* mddf_ptr = reinterpret_cast<ENTRY_MDDF const*>(theFile.getPointer());
     for (unsigned int i = 0; i < size / sizeof(ENTRY_MDDF); ++i)
     {
-        highGUID = std::max(highGUID, mddf_ptr[i].uniqueID);
+        if (!Noggit::Mods::isReservedUid(mddf_ptr[i].uniqueID))  // fixed mod uids do not move the counter
+          highGUID = std::max(highGUID, mddf_ptr[i].uniqueID);
     }
 
     // - MODF ----------------------------------------------
@@ -757,7 +759,8 @@ uint32_t MapIndex::getHighestGUIDFromFile(const std::string& pFilename) const
     ENTRY_MODF const* modf_ptr = reinterpret_cast<ENTRY_MODF const*>(theFile.getPointer());
     for (unsigned int i = 0; i < size / sizeof(ENTRY_MODF); ++i)
     {
-        highGUID = std::max(highGUID, modf_ptr[i].uniqueID);
+        if (!Noggit::Mods::isReservedUid(modf_ptr[i].uniqueID))  // fixed mod uids do not move the counter
+          highGUID = std::max(highGUID, modf_ptr[i].uniqueID);
     }
     theFile.close();
 
@@ -793,6 +796,9 @@ uint32_t MapIndex::newGUID()
     // update the highest uid in db, note that if the user don't save these uid won't be used (not really a problem tho) 
     Noggit::Sql::SqlUIDStorage::updateUIDinDB(_map_id, highestGUID + 1);
   }
+  // never hand out a uid of the reserved mod block (Noggit Mods fixed uids, mods/ReservedUid.hpp)
+  if (Noggit::Mods::isReservedUid(highestGUID + 1))
+    highestGUID = Noggit::Mods::RESERVED_UID_END - 1;
   return ++highestGUID;
 }
 
@@ -1042,7 +1048,9 @@ uid_fix_status MapIndex::fixUIDs (World* world, bool cancel_on_model_loading_err
 
   for (WMOInstance& instance : *wmos)
   {
-    instance.uid = highestGUID++;
+    // a fixed mod uid (reserved block) is kept; every other WMO is renumbered
+    if (!Noggit::Mods::isReservedUid(instance.uid))
+      instance.uid = highestGUID++;
     instance.wmo->wait_until_loaded();
     instance.recalcExtents();
     // no need to check if the loading is finished since the extents are stored inside the adt

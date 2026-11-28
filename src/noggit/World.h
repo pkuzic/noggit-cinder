@@ -317,11 +317,13 @@ public:
                                        glm::vec3 newPos, float scale,
                                        math::degrees::vec3 rotation);
 
+  // fixed_uid (Noggit Mods, reserved block only): use this uid instead of a new one; the caller checks it is free.
   WMOInstance* addWMOAndGetInstance ( BlizzardArchive::Listfile::FileKey const& file_key
       , glm::vec3 newPos
       , math::degrees::vec3 rotation
       , float scale
       , bool action
+      , std::optional<std::uint32_t> fixed_uid = std::nullopt
   );
   WMOInstance* addChunkMoverPreviewWMO(BlizzardArchive::Listfile::FileKey const& file_key,
                                        glm::vec3 newPos, math::degrees::vec3 rotation,

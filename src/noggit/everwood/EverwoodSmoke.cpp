@@ -53,6 +53,7 @@
 #include <QtWidgets/QMessageBox>
 namespace Noggit::Everwood { std::string profileText(bool reset); bool profileGet(char const* name, long& n, double& ms); }
 #include <QtWidgets/QDialog>
+#include <QtWidgets/QInputDialog>
 
 #include <algorithm>
 #include <chrono>
@@ -221,6 +222,24 @@ namespace Noggit::Everwood
         _tile_wait_x = -1;
       }
 
+      if (_modlog_wait)
+      {
+        // wait_mod_log: a mod log line containing the text, or FAIL at the deadline
+        auto* mod = Noggit::Mods::ModManager::instance().find(_modlog_id);
+        bool hit = false;
+        if (mod)
+          for (auto const& l : mod->log)
+            if (l.find(_modlog_text) != std::string::npos)
+              hit = true;
+        if (!hit && clock::now() < _modlog_deadline)
+        {
+          _busy = false;
+          return;
+        }
+        _modlog_wait = false;
+        expect(hit, "mod " + _modlog_id + " logged '" + _modlog_text + "'");
+      }
+
       if (_next >= _lines.size())
       {
         finish(0);
@@ -365,6 +384,31 @@ namespace Noggit::Everwood
         QString const label = line.section(' ', 2).trimmed();
         expect(Noggit::Mods::ModManager::instance().triggerAction(id.toStdString(), label.toStdString())
           , "mod_action " + id.toStdString() + " '" + label.toStdString() + "'");
+      }
+      else if (cmd == "modal_text")
+      {
+        // modal_text <png> <text>: the next modal is a mod.input / mod.choose dialog: saved to <png>, <text> entered
+        // (an input field, or the item of a list), then OK. Arm it BEFORE the step that opens it.
+        _modals.push_back({ a.value(1), QString(), true, line.section(' ', 2) });
+        armModalWatcher();
+      }
+      else if (cmd == "mod_pick")
+      {
+        // mod_pick <path>: the next mod.pick_file answers this path (no native file dialog)
+        Noggit::Mods::ModManager::instance().setNextPickedFile(line.mid(cmd.size() + 1).trimmed().toStdWString());
+      }
+      else if (cmd == "mod_hook")
+      {
+        // mod_hook <save|export|map_open>: fires that hook for every mod, as Noggit would
+        Noggit::Mods::ModManager::instance().fireHook(a.value(1).toStdString());
+      }
+      else if (cmd == "wait_mod_log")
+      {
+        // wait_mod_log <mod id> <timeout ms> <text>: waits for a log line of the mod that contains <text>
+        _modlog_id = a.value(1).toStdString();
+        _modlog_deadline = clock::now() + std::chrono::milliseconds(a.value(2).toInt());
+        _modlog_text = line.section(' ', 3).toStdString();
+        _modlog_wait = true;
       }
       else if (cmd == "mod_report")
       {
@@ -1526,7 +1570,7 @@ namespace Noggit::Everwood
       return true;
     }
 
-    struct PendingModal { QString png; QString button; };
+    struct PendingModal { QString png; QString button; bool text_input = false; QString text; };
 
     void armModalWatcher()
     {
@@ -1546,9 +1590,27 @@ namespace Noggit::Everwood
         std::string text = w->windowTitle().toStdString();
         if (auto* box = qobject_cast<QMessageBox*>(w))
           text += " | " + box->text().toStdString() + " | " + box->informativeText().toStdString();
+        if (auto* dlg = qobject_cast<QInputDialog*>(w))
+          text += " | " + dlg->labelText().toStdString();
         std::replace(text.begin(), text.end(), '\n', ' ');
         bool const saved = w->grab().save(pending.png);
         report(std::string(saved ? "modal shot " : "FAIL modal shot not written ") + pending.png.toStdString() + " : " + text);
+        if (pending.text_input)
+        {
+          auto* dlg = qobject_cast<QInputDialog*>(w);
+          if (!dlg)
+          {
+            report("FAIL modal is not an input dialog, closing it");
+            _failed = true;
+            w->close();
+            return;
+          }
+          dlg->setTextValue(pending.text);
+          // never echo a secret field into the result file
+          report(dlg->textEchoMode() == QLineEdit::Password ? "modal input (secret) entered" : "modal input '" + pending.text.toStdString() + "'");
+          dlg->done(QDialog::Accepted);
+          return;
+        }
         QAbstractButton* hit = nullptr;
         for (auto* b : w->findChildren<QAbstractButton*>())
           if (QString(b->text()).remove('&') == pending.button)
@@ -1647,6 +1709,9 @@ namespace Noggit::Everwood
 
     clock::time_point _wait_until = clock::now();
     int _tile_wait_x = -1, _tile_wait_z = -1;
+    bool _modlog_wait = false;
+    std::string _modlog_id, _modlog_text;
+    clock::time_point _modlog_deadline;
     clock::time_point _tile_deadline;
   };
 

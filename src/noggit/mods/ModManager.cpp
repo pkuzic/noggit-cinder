@@ -404,6 +404,7 @@ namespace Noggit::Mods
 
   void ModManager::startMod(Mod& m)
   {
+    stopAsync(m);
     m.actions.clear();
     m.hooks.clear();
     m.modules.clear();
@@ -436,6 +437,7 @@ namespace Noggit::Mods
     else
     {
       m.state = ModState::Failed;
+      stopAsync(m);
       m.actions.clear();
       m.hooks.clear();
       m.modules.clear();
@@ -483,6 +485,23 @@ namespace Noggit::Mods
         QString::fromStdString(mod.displayName() + " - " + what + " failed:\n\n" + error));
     }
     return false;
+  }
+
+  void ModManager::runDeferred(Mod& mod, std::string const& what, std::function<void()> fn)
+  {
+    if (mod.busy)
+    {
+      // A modal dialog of this mod is open (its nested event loop delivered us): try again shortly.
+      Mod* m = &mod;
+      int const gen = mod.generation;
+      QTimer::singleShot(100, [this, m, gen, what, fn = std::move(fn)]() mutable
+      {
+        if (m->generation == gen && m->state == ModState::Loaded)
+          runDeferred(*m, what, std::move(fn));
+      });
+      return;
+    }
+    runGuarded(mod, what, fn, true);
   }
 
   void ModManager::fireHook(std::string const& name)
@@ -619,7 +638,8 @@ namespace Noggit::Mods
           }
           else if (verdict == 0 && mod->state == ModState::Loaded)
           {
-            // Stop it now: menu actions and hooks go away with its Lua state.
+            // Stop it now: menu actions, hooks, HTTP jobs and timers go away with its Lua state.
+            stopAsync(*mod);
             mod->actions.clear();
             mod->hooks.clear();
             mod->modules.clear();

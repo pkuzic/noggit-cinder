@@ -4,9 +4,11 @@
 // the capabilities it declares in mod.json and the user approved. See docs/MODS.md.
 #pragma once
 
+#include <noggit/mods/ReservedUid.hpp>
 #include <sol/sol.hpp>
 #include <glm/vec3.hpp>
 
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <functional>
@@ -23,7 +25,10 @@ class QWidget;
 
 namespace Noggit::Mods
 {
-  constexpr int API_VERSION = 1;
+  // 1 = P7a; 2 = per-mod settings, async HTTP + timers, hashes, time, map_info, choose, fixed uids (additive).
+  constexpr int API_VERSION = 2;
+
+  struct AsyncHttpJob;  // ModApi.cpp
 
   struct ModPermissions
   {
@@ -77,6 +82,11 @@ namespace Noggit::Mods
     std::set<std::filesystem::path> picked_files;  // files the user chose in mod.pick_file (readable)
     std::map<std::string, sol::table> modules;      // mod-local require() cache
     bool busy = false;
+    // Async work (ModApi.cpp). Lua functions live ONLY here so they can be released before the Lua state dies.
+    int generation = 0;                                       // bumped whenever the Lua state is (re)made or stopped
+    int next_handle = 1;
+    std::map<int, std::shared_ptr<AsyncHttpJob>> http_jobs;   // mod.http_*_async
+    std::map<int, sol::protected_function> timers;            // mod.after
 
     std::string displayName() const;
     void addLog(std::string const& line);
@@ -112,6 +122,14 @@ namespace Noggit::Mods
     bool triggerAction(std::string const& id, std::string const& label);
     QMenu* menu() const { return _menu; }
 
+    // Runs a callback inside the mod's error barrier; while the mod is busy (a modal dialog of the same mod is open)
+    // it is retried every 100 ms. Used by async HTTP and timers.
+    void runDeferred(Mod& mod, std::string const& what, std::function<void()> fn);
+
+    // Smoke-test hook: the next mod.pick_file answers this path instead of opening the (native) dialog.
+    void setNextPickedFile(std::filesystem::path const& p) { _next_pick = p; }
+    std::filesystem::path takeNextPickedFile() { auto p = _next_pick; _next_pick.clear(); return p; }
+
   private:
     ModManager() = default;
 
@@ -132,10 +150,13 @@ namespace Noggit::Mods
     std::function<glm::vec3()> _cursor;
     QWidget* _window = nullptr;
     QMenu* _menu = nullptr;
+    std::filesystem::path _next_pick;
   };
 
   // ModApi.cpp: builds the per-mod `mod` table (core API + permission-gated API).
   void registerModApi(Mod& mod, sol::state& lua);
+  // ModApi.cpp: aborts the mod's HTTP jobs and drops its timers (call BEFORE resetting its Lua state).
+  void stopAsync(Mod& mod);
 
   // Path helpers (ModApi.cpp), exposed for ModManager's manifest checks.
   bool isSafeRelativePath(std::string const& rel);
